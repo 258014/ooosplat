@@ -24,7 +24,7 @@ use crate::{
         GaussianTransform, ProjectStatus,
     },
     reconstruction::{ply::inspect_gaussian_ply, splat_transform::export_transformed_ply},
-    video::{FramePlan, FrameSelectionStrategy, UniformRatioFrameSelection, VideoInfo},
+    video::{create_image_plan, list_images, FramePlan, FrameSelectionStrategy, UniformRatioFrameSelection, VideoInfo},
 };
 
 #[derive(Default)]
@@ -104,7 +104,7 @@ pub struct GaussianVideoExportResult {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeAndPlan {
-    video: VideoInfo,
+    video: Option<VideoInfo>,
     plan: FramePlan,
 }
 
@@ -128,9 +128,23 @@ pub async fn probe_and_plan(
     path: String,
     quality: Quality,
 ) -> std::result::Result<ProbeAndPlan, SplatError> {
-    let video = probe_video(&paths_for_app(&app).ffprobe, &PathBuf::from(path), None).await?;
+    let input = PathBuf::from(&path);
+    if input.is_dir() {
+        let images = list_images(&input)?;
+        if images.is_empty() {
+            return Err(SplatError::InvalidVideo(
+                "图片序列为空，未找到支持的图片文件".into(),
+            ));
+        }
+        let plan = create_image_plan(images.len() as u64, &quality.preset());
+        return Ok(ProbeAndPlan { video: None, plan });
+    }
+    let video = probe_video(&paths_for_app(&app).ffprobe, &input, None).await?;
     let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
-    Ok(ProbeAndPlan { video, plan })
+    Ok(ProbeAndPlan {
+        video: Some(video),
+        plan,
+    })
 }
 
 #[tauri::command]
