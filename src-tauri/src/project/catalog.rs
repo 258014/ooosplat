@@ -9,9 +9,62 @@ use uuid::Uuid;
 
 use crate::{
     error::{Result, SplatError},
+    pipeline::estimate::RuntimeSample,
     project::{manager::atomic_write_json, ProjectMetadata, ProjectStatus, PROJECT_APP_ID},
     reconstruction::ply::inspect_gaussian_ply,
 };
+
+pub async fn runtime_samples() -> Vec<RuntimeSample> {
+    let Ok(index) = load_index().await else {
+        return Vec::new();
+    };
+    let mut samples = Vec::new();
+    for item in index.projects.into_iter().rev() {
+        let Ok(metadata_bytes) = tokio::fs::read(item.path.join("project.json")).await else {
+            continue;
+        };
+        let Ok(metadata) = serde_json::from_slice::<ProjectMetadata>(&metadata_bytes) else {
+            continue;
+        };
+        let Some(duration_ms) = metadata
+            .duration_ms
+            .filter(|_| metadata.status == ProjectStatus::Completed)
+        else {
+            continue;
+        };
+        let state_bytes = tokio::fs::read(item.path.join("state.json")).await.ok();
+        let Some(extracted_frames) = runtime_sample_frame_count(
+            state_bytes.as_deref(),
+            metadata.output.as_ref().map(|output| output.input_images),
+        ) else {
+            continue;
+        };
+        samples.push(RuntimeSample {
+            quality: metadata.quality,
+            extracted_frames,
+            duration_ms,
+        });
+        if samples.len() == 20 {
+            break;
+        }
+    }
+    samples
+}
+
+fn runtime_sample_frame_count(
+    state_bytes: Option<&[u8]>,
+    output_frames: Option<u64>,
+) -> Option<u64> {
+    state_bytes
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|state| {
+            state
+                .pointer("/frames/extractedFrames")
+                .and_then(|value| value.as_u64())
+        })
+        .or(output_frames)
+        .filter(|count| *count > 0)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -390,6 +443,21 @@ mod tests {
         assert!(!serde_json::to_string(&parsed)
             .unwrap()
             .contains("colmapAcceleration"));
+    }
+
+    #[test]
+    fn runtime_samples_fall_back_to_project_output_for_legacy_state() {
+        let legacy_state = br#"{"stage":"completed"}"#;
+        assert_eq!(
+            runtime_sample_frame_count(Some(legacy_state), Some(533)),
+            Some(533)
+        );
+        let current_state = br#"{"frames":{"extractedFrames":320}}"#;
+        assert_eq!(
+            runtime_sample_frame_count(Some(current_state), Some(533)),
+            Some(320)
+        );
+        assert_eq!(runtime_sample_frame_count(None, Some(0)), None);
     }
 
     #[test]

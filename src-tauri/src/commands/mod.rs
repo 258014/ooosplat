@@ -16,12 +16,15 @@ use crate::{
         ColmapAccelerationStatus, EnginePaths, EngineStatus,
     },
     error::{Result, SplatError},
-    pipeline::runner::{PipelineResult, PipelineRunner},
+    pipeline::{
+        estimate::{estimate_runtime, RuntimeEstimate},
+        runner::{PipelineResult, PipelineRunner},
+    },
     presets::Quality,
     project::{
         catalog::{self, AppSettings, ProjectOverview},
         manager::atomic_write_json,
-        GaussianTransform, ProjectStatus,
+        GaussianTransform, PipelineStateFile, ProjectStatus,
     },
     reconstruction::{ply::inspect_gaussian_ply, splat_transform::export_transformed_ply},
     telemetry::{PipelineTelemetrySession, TelemetryPreferences, TelemetryService},
@@ -107,6 +110,7 @@ pub struct GaussianVideoExportResult {
 pub struct ProbeAndPlan {
     video: VideoInfo,
     plan: FramePlan,
+    estimate: RuntimeEstimate,
 }
 
 fn paths_for_app(app: &tauri::AppHandle) -> EnginePaths {
@@ -129,9 +133,76 @@ pub async fn probe_and_plan(
     path: String,
     quality: Quality,
 ) -> std::result::Result<ProbeAndPlan, SplatError> {
-    let video = probe_video(&paths_for_app(&app).ffprobe, &PathBuf::from(path), None).await?;
+    let engine_paths = paths_for_app(&app);
+    let video = probe_video(&engine_paths.ffprobe, &PathBuf::from(path), None).await?;
     let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
-    Ok(ProbeAndPlan { video, plan })
+    let samples = catalog::runtime_samples().await;
+    let estimate = estimate_runtime(&video, &plan, quality, &samples);
+    Ok(ProbeAndPlan {
+        video,
+        plan,
+        estimate,
+    })
+}
+
+fn resume_checkpoint_fraction(state: &PipelineStateFile) -> (f64, &'static str) {
+    if state.brush_complete {
+        (0.98, "结果发布")
+    } else if state.reconstruction_complete {
+        (0.60, "Brush 训练")
+    } else if state.matching_complete {
+        (0.45, "相机重建")
+    } else if state.features_complete {
+        (0.32, "顺序匹配")
+    } else if state
+        .frames
+        .as_ref()
+        .and_then(|frames| frames.extracted_frames)
+        .is_some_and(|count| count > 0)
+    {
+        (0.20, "特征提取")
+    } else {
+        (0.0, "画面提取")
+    }
+}
+
+#[tauri::command]
+pub async fn estimate_project_runtime(
+    app: tauri::AppHandle,
+    project_id: Uuid,
+) -> Result<RuntimeEstimate> {
+    let (project, metadata) = catalog::load_registered_project(project_id).await?;
+    let state_bytes = tokio::fs::read(project.join("state.json")).await?;
+    let state: PipelineStateFile = serde_json::from_slice(&state_bytes)?;
+    let video = match state.video.clone() {
+        Some(video) => video,
+        None => probe_video(&paths_for_app(&app).ffprobe, &metadata.source_path, None).await?,
+    };
+    let plan = match state.frames.as_ref() {
+        Some(frames) => FramePlan {
+            retention_ratio: frames.retention_ratio,
+            sampling_fps: frames.sampling_fps,
+            estimated_frames: frames
+                .extracted_frames
+                .unwrap_or(frames.estimated_frames)
+                .max(1),
+        },
+        None => UniformRatioFrameSelection.create_plan(&video, &metadata.quality.preset()),
+    };
+    let samples = catalog::runtime_samples().await;
+    let mut estimate = estimate_runtime(&video, &plan, metadata.quality, &samples);
+    let previous_duration = metadata.duration_ms.unwrap_or(0);
+    let (completed_fraction, next_stage) = resume_checkpoint_fraction(&state);
+    let remaining_fraction = 1.0 - completed_fraction;
+    let remaining = |total: u64| ((total as f64 * remaining_fraction).round() as u64).max(1_000);
+    estimate.estimated_ms = previous_duration.saturating_add(remaining(estimate.estimated_ms));
+    estimate.lower_bound_ms = previous_duration.saturating_add(remaining(estimate.lower_bound_ms));
+    estimate.upper_bound_ms = previous_duration.saturating_add(remaining(estimate.upper_bound_ms));
+    estimate.basis = format!(
+        "{}；已计入此前耗时，预计从{next_stage}阶段继续",
+        estimate.basis
+    );
+    Ok(estimate)
 }
 
 #[tauri::command]
@@ -202,6 +273,57 @@ pub async fn start_pipeline(
     let result = runner
         .generate(Path::new(&path), quality, Path::new(&projects_root))
         .await;
+    match &result {
+        Ok(output) => telemetry_session.generation_completed(
+            output.duration_ms,
+            output.input_images,
+            output.source_duration_seconds,
+        ),
+        Err(error) => telemetry_session.generation_failed(error),
+    }
+    if let Err(error) = &result {
+        let stage = if matches!(error, SplatError::Cancelled) {
+            crate::pipeline::PipelineStage::Cancelled
+        } else {
+            crate::pipeline::PipelineStage::Failed
+        };
+        let mut event = crate::pipeline::PipelineEvent::mapped(stage, 1.0, error.to_string());
+        event.elapsed_ms = started.elapsed().as_millis() as u64;
+        let _ = app.emit("pipeline-event", event);
+    }
+    *state.active.lock().await = None;
+    result
+}
+
+#[tauri::command]
+pub async fn resume_pipeline(
+    app: tauri::AppHandle,
+    state: State<'_, PipelineController>,
+    telemetry: State<'_, TelemetryService>,
+    project_id: String,
+) -> std::result::Result<PipelineResult, SplatError> {
+    let project_id = parse_project_id(&project_id)?;
+    let (_, metadata) = catalog::load_registered_project(project_id).await?;
+    let emitter = app.clone();
+    let started = Instant::now();
+    let telemetry_session = Arc::new(PipelineTelemetrySession::new(
+        telemetry.inner().clone(),
+        metadata.quality,
+    ));
+    let event_telemetry = telemetry_session.clone();
+    let runner = Arc::new(PipelineRunner::new(paths_for_app(&app), move |event| {
+        event_telemetry.observe(&event);
+        let _ = emitter.emit("pipeline-event", event);
+    }));
+    {
+        let mut active = state.active.lock().await;
+        if active.is_some() {
+            return Err(SplatError::Process("已有任务正在运行".into()));
+        }
+        *active = Some(runner.clone());
+    }
+    telemetry_session.generation_started();
+    let result = runner.resume(project_id).await;
     match &result {
         Ok(output) => telemetry_session.generation_completed(
             output.duration_ms,
