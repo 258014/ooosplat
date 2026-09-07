@@ -23,7 +23,8 @@ See the [OOOSplat Roadmap](ROADMAP.md) for planned work.
 ## Why OOOSplat
 
 - **One-click Gaussian generation**: Select an input video, project directory, and quality preset. OOOSplat then runs FFmpeg frame extraction, COLMAP camera reconstruction, Brush training, and `final.ply` publishing without manual engine setup or command-line orchestration.
-- **Security and privacy protection**: Source media, extracted frames, camera reconstruction data, Gaussian models, and logs stay in the user-selected local project directory by default. The core generation workflow runs on the user's machine, so original videos, images, and models do not need to be uploaded to third-party reconstruction or training platforms. This reduces exposure risks during network transfer, cloud retention, and unauthorized access. Non-destructive transforms and exports preserve the original `final.ply`, keeping project data under the user's control.
+- **Cross-platform compatibility**: Supports Windows, macOS, and Linux, bringing local Gaussian Splat generation to all three major desktop platforms. See the compatibility section below for specific OS and processor requirements.
+- **Security and privacy protection**: Source media, extracted frames, camera reconstruction data, Gaussian models, and logs stay in the user-selected local project directory by default. The core generation workflow runs on the user's machine, so original videos, images, and models do not need to be uploaded to third-party reconstruction or training platforms. This reduces exposure risks during network transfer, cloud retention, and unauthorized access.
 - **Fully local compute**: Reconstruction and training run on the user's own machine without remote compute services. COLMAP automatically uses a compatible local NVIDIA GPU when available and falls back to CPU otherwise, keeping both processing and data under the user's control.
 
 ## Interface Preview
@@ -49,11 +50,19 @@ See the [OOOSplat Roadmap](ROADMAP.md) for planned work.
 - Track completed, failed, interrupted, and cancelled tasks.
 - Preview completed `.ply` projects under “03 Preview” with Orbit, Pan, and Zoom. Switching between Adjust and Animation does not reload the model or reset the camera.
 - Use Adjust mode to edit whole-model position, rotation, and uniform scale, with undo and redo.
-- Persist transforms in `project.json` and export numbered `edited.ply` copies without overwriting `final.ply`.
+- Use rectangle, sphere, and box Gaussian selection tools. Rectangle selection projects centers through the scene for non-destructive deletion, while sphere and box crops keep points inside the live selection volume.
+- Crop and deletion state is saved automatically. “Save” writes the current result to the single `edit.ply`; later saves safely replace it, while the original `final.ply` is never overwritten.
 - Play a 5-second reveal, an 8-second shockwave, and a continuous camera orbit, then export a watermarked 1080×1920, 30 fps, 23-second H.264 MP4.
 - Reveal `final.ply` in the platform file manager or move the complete project to the system trash.
 - Resize the left and right panels by dragging the divider, and scale the full interface from 80% to 140%.
 - Support Chinese characters, spaces, long file names, and UNC project paths.
+
+### Gaussian Editing Shortcuts
+
+- In Rectangle Select, drag with the left mouse button to replace the selection, use `Shift + drag` to add, and `Ctrl + drag` to remove. Use the middle mouse button to orbit, the right mouse button to pan, and the wheel to zoom.
+- Yellow highlights show the temporary selection. Press `Delete` or `Backspace` to remove selected Gaussians non-destructively, or `Esc` to clear the temporary selection.
+- Sphere and box selection enter an orthographic view automatically. Switch between side, front, and top views, then adjust the volume in the viewport or through numeric fields.
+- Use `Ctrl + Z` to undo and `Ctrl + Shift + Z` or `Ctrl + Y` to redo. Transform, crop, and deletion changes share one history; camera movement and temporary highlights are not recorded.
 
 ## Processing Pipeline
 
@@ -68,7 +77,7 @@ Input video
   └─ Validate the PLY and atomically publish final.ply
 ```
 
-The task stops when COLMAP registers fewer than 50% of the input images. A 50%–80% registration rate produces a quality warning but continues, while 80% or higher is treated as normal.
+As long as COLMAP produces at least one registered image and valid 3D points, the task continues to Brush. Registration below 80% produces a quality warning, but no longer stops automatically below 50%.
 
 ## System Requirements
 
@@ -130,7 +139,7 @@ The `.deb` installs FFmpeg, FFprobe, and CPU COLMAP through Ubuntu's package man
 5. Select the Fast, Balanced, or Detailed quality preset.
 6. Review the automatically detected COLMAP acceleration status and its explanation, then select “Start Generation.”
 7. Follow live stages, metrics, and logs on the left. When processing finishes, select “Preview” under “02 Task History.”
-8. Edit the model in the “Adjust” mode under “03 Preview.” Changes are saved automatically; “Export Gaussian” writes a new edited PLY.
+8. Edit the model in the “Adjust” mode under “03 Preview.” Changes are saved automatically; “Save” creates or updates `edit.ply`.
 9. Switch to “Animation” for the portrait composition and staged playback. “Export Video” writes a 23-second portrait MP4 into the project directory.
 
 Usage notes:
@@ -158,8 +167,7 @@ Each generation creates a separate directory under the projects root:
 <projects-root>\<yyyyMMdd-HHmmss_video-name>\
   final.ply             Final Gaussian Splatting file
   project.json          Project metadata and result metrics
-  edited.ply            First optional non-destructive transform export
-  edited-2.ply          Later exports are automatically numbered
+  edit.ply              Current edited result; safely replaced on later saves (optional)
   preview.mp4           First optional animation-preview video export
   preview-2.mp4         Later video exports are automatically numbered
   state.json            Pipeline state
@@ -313,9 +321,9 @@ On Linux, `OOOSPLAT_FFMPEG`, `OOOSPLAT_FFPROBE`, `OOOSPLAT_COLMAP`, and `OOOSPLA
 
 OOOSplat enables COLMAP GPU acceleration only when the bundled CUDA runtime is healthy and it can confirm an NVIDIA driver version of at least 528.33 and Compute Capability 5.0 or higher. If detection fails or a requirement is not met, COLMAP automatically falls back to CPU and the application shows the specific reason. Brush is independent of COLMAP and selects an available graphics backend at runtime.
 
-### Why does a task stop after camera reconstruction?
+### Why does OOOSplat warn about a low registration rate?
 
-The usual cause is an image registration rate below 50%. Use an orbit video with stable exposure, clear frames, continuous movement, and sufficient viewpoint overlap. Avoid fast rotation, strong reflections, large plain-color areas, and moving subjects.
+A low registration rate usually means COLMAP could not find enough continuous, overlapping viewpoints. The task still continues to Brush, but result quality may be affected. Use an orbit video with stable exposure, clear frames, continuous movement, and sufficient viewpoint overlap. Avoid fast rotation, strong reflections, large plain-color areas, and moving subjects.
 
 ### Why does a project use so much disk space?
 

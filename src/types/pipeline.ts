@@ -100,6 +100,22 @@ export interface GaussianTransform {
   rotation: [number, number, number];
   scale: number;
 }
+export type GaussianEditorTool = "transform" | "rectangle" | "sphere" | "box";
+export type GaussianOrthographicView = "side" | "front" | "top";
+export type GaussianCrop =
+  | { kind: "sphere"; center: [number, number, number]; radius: number }
+  | { kind: "box"; center: [number, number, number]; size: [number, number, number] }
+  | null;
+export interface GaussianEditState {
+  crop: GaussianCrop;
+  revision: number;
+  sourceSplatCount: number;
+  deletedCount: number;
+}
+export interface GaussianEditSaveSession {
+  editId: string;
+  expectedMaskBytes: number;
+}
 export interface GaussianPreviewDescriptor {
   projectId: string;
   modelPath: string;
@@ -108,6 +124,8 @@ export interface GaussianPreviewDescriptor {
   fileSize: number;
   splatCount: number;
   transform: GaussianTransform;
+  editing: GaussianEditState;
+  editMaskAssetPath: string | null;
 }
 export interface GaussianExportProgress {
   projectId: string;

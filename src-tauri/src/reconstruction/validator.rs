@@ -5,14 +5,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, SplatError};
 
 pub const GOOD_REGISTERED_RATIO: f64 = 0.80;
-pub const WARNING_REGISTERED_RATIO: f64 = 0.50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReconstructionQuality {
     Good,
     Warning,
-    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,10 +49,8 @@ impl ReconstructionValidator {
         let registered_ratio = registered_images as f64 / input_images as f64;
         let quality = if registered_ratio >= GOOD_REGISTERED_RATIO {
             ReconstructionQuality::Good
-        } else if registered_ratio >= WARNING_REGISTERED_RATIO {
-            ReconstructionQuality::Warning
         } else {
-            ReconstructionQuality::Failed
+            ReconstructionQuality::Warning
         };
         Ok(ReconstructionReport {
             input_images,
@@ -93,10 +89,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thresholds_match_product_rules() {
+    fn all_nonzero_registration_ratios_can_continue() {
         assert_eq!(classify(0.8), ReconstructionQuality::Good);
         assert_eq!(classify(0.5), ReconstructionQuality::Warning);
-        assert_eq!(classify(0.499), ReconstructionQuality::Failed);
+        assert_eq!(classify(0.499), ReconstructionQuality::Warning);
+        assert_eq!(classify(0.001), ReconstructionQuality::Warning);
     }
 
     #[test]
@@ -112,10 +109,8 @@ mod tests {
     fn classify(ratio: f64) -> ReconstructionQuality {
         if ratio >= GOOD_REGISTERED_RATIO {
             ReconstructionQuality::Good
-        } else if ratio >= WARNING_REGISTERED_RATIO {
-            ReconstructionQuality::Warning
         } else {
-            ReconstructionQuality::Failed
+            ReconstructionQuality::Warning
         }
     }
 }

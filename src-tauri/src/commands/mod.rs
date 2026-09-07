@@ -4,7 +4,7 @@ use std::{
     time::Instant,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{ipc::InvokeBody, Emitter, Manager, State};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
@@ -24,9 +24,16 @@ use crate::{
     project::{
         catalog::{self, AppSettings, ProjectOverview},
         manager::atomic_write_json,
-        GaussianTransform, PipelineStateFile, ProjectStatus,
+        GaussianCrop, GaussianEditing, GaussianTransform, PipelineStateFile, ProjectStatus,
     },
-    reconstruction::{ply::inspect_gaussian_ply, splat_transform::export_transformed_ply},
+    reconstruction::{
+        edit_mask::{
+            cleanup_old_masks, count_deleted, mask_path, packed_mask_bytes, read_mask,
+            remove_edit_files, write_mask_atomic,
+        },
+        ply::inspect_gaussian_ply,
+        splat_transform::{export_transformed_ply_with_edits, GaussianExportEdits},
+    },
     telemetry::{PipelineTelemetrySession, TelemetryPreferences, TelemetryService},
     video::{FramePlan, FrameSelectionStrategy, UniformRatioFrameSelection, VideoInfo},
 };
@@ -42,12 +49,23 @@ pub struct PreviewController {
     metadata_write: Mutex<()>,
     export: Mutex<()>,
     video_export: Mutex<Option<GaussianVideoExportSession>>,
+    edit_save: Mutex<Option<GaussianEditSaveSession>>,
 }
 
 #[derive(Debug, Clone)]
 struct GaussianPreviewSession {
     project_id: Uuid,
-    asset_path: PathBuf,
+    asset_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct GaussianEditSaveSession {
+    edit_id: Uuid,
+    project_id: Uuid,
+    base_revision: u64,
+    next_revision: u64,
+    splat_count: u64,
+    crop: Option<GaussianCrop>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +86,22 @@ pub struct GaussianPreviewDescriptor {
     file_size: u64,
     splat_count: u64,
     transform: GaussianTransform,
+    editing: GaussianEditing,
+    edit_mask_asset_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GaussianEditDraft {
+    crop: Option<GaussianCrop>,
+    base_revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GaussianEditSaveReservation {
+    edit_id: Uuid,
+    expected_mask_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -376,6 +410,14 @@ pub async fn delete_project(
         }
     }
     drop(active);
+    let mut edit_save = preview.edit_save.lock().await;
+    if edit_save
+        .as_ref()
+        .is_some_and(|session| session.project_id == id)
+    {
+        *edit_save = None;
+    }
+    drop(edit_save);
     catalog::delete_project(id).await
 }
 
@@ -416,9 +458,15 @@ async fn create_preview_asset(project_root: &Path, source: &Path) -> Result<Path
 async fn discard_preview_asset(app: &tauri::AppHandle, session: GaussianPreviewSession) {
     // `forbid_file` is permanent for the lifetime of this Tauri scope. It is therefore only safe
     // for the unique session alias, never for final.ply, which must be previewable again later.
-    let _ = app.asset_protocol_scope().forbid_file(&session.asset_path);
-    let parent = session.asset_path.parent().map(Path::to_path_buf);
-    let _ = tokio::fs::remove_file(&session.asset_path).await;
+    let parent = session
+        .asset_paths
+        .first()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf);
+    for asset_path in session.asset_paths {
+        let _ = app.asset_protocol_scope().forbid_file(&asset_path);
+        let _ = tokio::fs::remove_file(asset_path).await;
+    }
     if let Some(parent) = parent {
         let _ = tokio::fs::remove_dir(parent).await;
     }
@@ -434,6 +482,12 @@ pub async fn prepare_gaussian_preview(
     let (project_root, path, metadata) = catalog::registered_final_ply_for_project(id).await?;
     let info = inspect_gaussian_ply(&path)?;
     let transform = metadata.transform.validate()?;
+    let editing = metadata.editing.validate(info.splat_count)?;
+    let edit_mask = read_mask(&project_root, editing).map_err(|error| {
+        SplatError::Process(format!(
+            "Gaussian 编辑数据已损坏或与源文件不兼容：{error}。可在预览中重置编辑状态后恢复。"
+        ))
+    })?;
 
     let mut active = state.active.lock().await;
     if let Some(previous) = active.take() {
@@ -446,9 +500,24 @@ pub async fn prepare_gaussian_preview(
             let _ = std::fs::remove_file(&asset_path);
             SplatError::Process(format!("无法开放本地 PLY 预览资源：{error}"))
         })?;
+    let mut asset_paths = vec![asset_path.clone()];
+    let edit_mask_asset_path = if editing.revision > 0 || editing.deleted_count > 0 {
+        let path = asset_path.with_extension("mask.bin");
+        tokio::fs::write(&path, &edit_mask).await?;
+        app.asset_protocol_scope()
+            .allow_file(&path)
+            .map_err(|error| {
+                let _ = std::fs::remove_file(&path);
+                SplatError::Process(format!("无法开放 Gaussian 编辑位图资源：{error}"))
+            })?;
+        asset_paths.push(path.clone());
+        Some(preview_client_path(&path))
+    } else {
+        None
+    };
     *active = Some(GaussianPreviewSession {
         project_id: id,
-        asset_path: asset_path.clone(),
+        asset_paths,
     });
 
     Ok(GaussianPreviewDescriptor {
@@ -459,6 +528,8 @@ pub async fn prepare_gaussian_preview(
         file_size: info.file_size,
         splat_count: info.splat_count,
         transform,
+        editing,
+        edit_mask_asset_path,
     })
 }
 
@@ -480,6 +551,15 @@ pub async fn release_gaussian_preview(
     }
     drop(active);
 
+    let mut edit_save = state.edit_save.lock().await;
+    if edit_save
+        .as_ref()
+        .is_some_and(|session| session.project_id == id)
+    {
+        *edit_save = None;
+    }
+    drop(edit_save);
+
     let mut video_export = state.video_export.lock().await;
     if video_export
         .as_ref()
@@ -490,6 +570,154 @@ pub async fn release_gaussian_preview(
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn begin_gaussian_edit_save(
+    state: State<'_, PreviewController>,
+    project_id: String,
+    edit_state: GaussianEditDraft,
+) -> Result<GaussianEditSaveReservation> {
+    let project_id = parse_project_id(&project_id)?;
+    let (_, source, metadata) = catalog::registered_final_ply_for_project(project_id).await?;
+    let info = inspect_gaussian_ply(&source)?;
+    let current = metadata.editing.validate(info.splat_count)?;
+    if current.revision != edit_state.base_revision {
+        return Err(SplatError::Process(format!(
+            "Gaussian 编辑状态已更新（当前修订 {}，提交基于 {}），请重新加载后再试",
+            current.revision, edit_state.base_revision
+        )));
+    }
+    if let Some(crop) = edit_state.crop {
+        crop.validate()?;
+    }
+    if !state
+        .active
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|session| session.project_id == project_id)
+    {
+        return Err(SplatError::Process(
+            "项目当前未在预览中打开，无法保存编辑".into(),
+        ));
+    }
+    let mut active = state.edit_save.lock().await;
+    if active.is_some() {
+        return Err(SplatError::Process("已有 Gaussian 编辑正在保存".into()));
+    }
+    let edit_id = Uuid::new_v4();
+    let next_revision = current.revision.saturating_add(1);
+    *active = Some(GaussianEditSaveSession {
+        edit_id,
+        project_id,
+        base_revision: current.revision,
+        next_revision,
+        splat_count: info.splat_count,
+        crop: edit_state.crop,
+    });
+    Ok(GaussianEditSaveReservation {
+        edit_id,
+        expected_mask_bytes: packed_mask_bytes(info.splat_count)?,
+    })
+}
+
+#[tauri::command]
+pub async fn commit_gaussian_edit_save(
+    state: State<'_, PreviewController>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<GaussianEditing> {
+    let edit_id = request
+        .headers()
+        .get("x-ooosplat-edit-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| SplatError::Process("Gaussian 编辑保存令牌无效".into()))?;
+    let mask = match request.body() {
+        InvokeBody::Raw(bytes) => bytes.as_slice(),
+        _ => {
+            return Err(SplatError::Process(
+                "Gaussian 编辑位图必须通过原始二进制 IPC 提交".into(),
+            ))
+        }
+    };
+    let mut active = state.edit_save.lock().await;
+    if !active
+        .as_ref()
+        .is_some_and(|session| session.edit_id == edit_id)
+    {
+        return Err(SplatError::Process(
+            "Gaussian 编辑保存会话不存在或已结束".into(),
+        ));
+    }
+    // Taking the matching session while retaining the mutex guard guarantees every
+    // success or failure closes this token and no second save can overtake it.
+    let session = active.take().expect("matching session checked above");
+    if mask.len() != packed_mask_bytes(session.splat_count)? {
+        return Err(SplatError::Process(
+            "Gaussian 编辑位图长度与源文件不一致".into(),
+        ));
+    }
+    let deleted_count = count_deleted(mask, session.splat_count)?;
+    let _write_guard = state.metadata_write.lock().await;
+    let (root, _, mut metadata) =
+        catalog::registered_final_ply_for_project(session.project_id).await?;
+    if metadata.editing.revision != session.base_revision {
+        return Err(SplatError::Process(
+            "保存期间编辑状态已发生变化，请重新加载".into(),
+        ));
+    }
+    let editing = GaussianEditing {
+        crop: session.crop,
+        revision: session.next_revision,
+        source_splat_count: session.splat_count,
+        deleted_count,
+    };
+    // A process crash can leave a future revision file behind before project.json
+    // was published. It is not referenced by current metadata and is safe to replace.
+    let destination = mask_path(&root, editing.revision);
+    if destination.exists() {
+        std::fs::remove_file(&destination)?;
+    }
+    write_mask_atomic(&root, editing.revision, editing.source_splat_count, mask)?;
+    metadata.schema_version = crate::project::metadata::schema_version();
+    metadata.editing = editing;
+    if let Err(error) = atomic_write_json(&root.join("project.json"), &metadata).await {
+        let _ = std::fs::remove_file(mask_path(&root, editing.revision));
+        return Err(error);
+    }
+    cleanup_old_masks(&root, editing.revision);
+    drop(active);
+    Ok(editing)
+}
+
+#[tauri::command]
+pub async fn reset_gaussian_edits(
+    state: State<'_, PreviewController>,
+    project_id: String,
+) -> Result<GaussianEditing> {
+    let id = parse_project_id(&project_id)?;
+    let mut active = state.edit_save.lock().await;
+    if active
+        .as_ref()
+        .is_some_and(|session| session.project_id == id)
+    {
+        *active = None;
+    }
+    drop(active);
+    let _write_guard = state.metadata_write.lock().await;
+    let (root, source, mut metadata) = catalog::registered_final_ply_for_project(id).await?;
+    let splat_count = inspect_gaussian_ply(&source)?.splat_count;
+    metadata.schema_version = crate::project::metadata::schema_version();
+    metadata.editing = GaussianEditing {
+        source_splat_count: splat_count,
+        ..GaussianEditing::default()
+    };
+    atomic_write_json(&root.join("project.json"), &metadata).await?;
+    // The metadata switch is the authoritative reset. Old mask files are now
+    // unreachable, so a cleanup failure must not prevent reopening final.ply.
+    let _ = remove_edit_files(&root);
+    Ok(metadata.editing)
 }
 
 #[tauri::command]
@@ -515,28 +743,47 @@ pub async fn export_transformed_gaussian(
     state: State<'_, PreviewController>,
     project_id: String,
     transform: GaussianTransform,
+    edit_revision: Option<u64>,
 ) -> Result<GaussianExportResult> {
     let id = parse_project_id(&project_id)?;
     let transform = transform.validate()?;
     let _export_guard = state.export.lock().await;
-    let (root, source, _) = catalog::registered_final_ply_for_project(id).await?;
+    let (root, source, metadata) = catalog::registered_final_ply_for_project(id).await?;
+    let source_info = inspect_gaussian_ply(&source)?;
+    let editing = metadata.editing.validate(source_info.splat_count)?;
+    if edit_revision.is_some_and(|revision| revision != editing.revision) {
+        return Err(SplatError::Process(format!(
+            "编辑状态尚未保存完成（导出请求修订 {:?}，当前修订 {}）",
+            edit_revision, editing.revision
+        )));
+    }
+    let mask = read_mask(&root, editing)?;
     let emitter = app.clone();
     let (path, info) = tokio::task::spawn_blocking(move || {
-        export_transformed_ply(&source, &root, transform, |processed, total| {
-            let _ = emitter.emit(
-                "gaussian-export-progress",
-                GaussianExportProgress {
-                    project_id: id,
-                    processed_splats: processed,
-                    total_splats: total,
-                    progress: if total == 0 {
-                        0.0
-                    } else {
-                        processed as f64 / total as f64 * 100.0
+        export_transformed_ply_with_edits(
+            &source,
+            &root,
+            transform,
+            GaussianExportEdits {
+                crop: editing.crop,
+                deleted_mask: Some(&mask),
+            },
+            |processed, total| {
+                let _ = emitter.emit(
+                    "gaussian-export-progress",
+                    GaussianExportProgress {
+                        project_id: id,
+                        processed_splats: processed,
+                        total_splats: total,
+                        progress: if total == 0 {
+                            0.0
+                        } else {
+                            processed as f64 / total as f64 * 100.0
+                        },
                     },
-                },
-            );
-        })
+                );
+            },
+        )
     })
     .await
     .map_err(|error| SplatError::Process(format!("Gaussian 导出线程失败：{error}")))??;

@@ -587,17 +587,9 @@ impl PipelineRunner {
             "正在核验注册率和三维点",
         );
         let (model, report) = best_sparse_model(&paths.frames, &sparse)?;
-        if report.quality == ReconstructionQuality::Failed {
-            return Err(SplatError::Process(format!(
-                "素材重建失败：注册 {}/{} 张（{:.1}%），低于 50% 阈值",
-                report.registered_images,
-                report.input_images,
-                report.registered_ratio * 100.0
-            )));
-        }
         let warning = (report.quality == ReconstructionQuality::Warning).then(|| {
             format!(
-                "注册率 {:.1}%：低于 80%，结果质量可能受影响",
+                "注册率 {:.1}%：低于 80%，将继续训练，但结果质量可能受影响",
                 report.registered_ratio * 100.0
             )
         });

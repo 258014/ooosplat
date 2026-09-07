@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { ColmapAccelerationStatus, EngineStatus, FramePlan, GaussianExportProgress, GaussianExportResult, GaussianPreviewDescriptor, GaussianTransform, GaussianVideoExportResult, GaussianVideoExportSession, PipelineEvent, PipelineResult, ProjectOverview, ProjectSummary, Quality, RuntimeEstimate, VideoInfo } from "../types/pipeline";
+import type { ColmapAccelerationStatus, EngineStatus, FramePlan, GaussianCrop, GaussianEditSaveSession, GaussianEditState, GaussianExportProgress, GaussianExportResult, GaussianPreviewDescriptor, GaussianTransform, GaussianVideoExportResult, GaussianVideoExportSession, PipelineEvent, PipelineResult, ProjectOverview, ProjectSummary, Quality, RuntimeEstimate, VideoInfo } from "../types/pipeline";
 import type { TelemetryPreferences } from "../types/telemetry";
 import { previewAssetUrl } from "./previewAssetUrl";
 
@@ -33,16 +33,42 @@ export async function onPipelineEvent(handler: (event: PipelineEvent) => void): 
 export async function initializeTelemetry(): Promise<TelemetryPreferences> { return invoke("initialize_telemetry"); }
 export async function setTelemetryConsent(enabled: boolean): Promise<TelemetryPreferences> { return invoke("set_telemetry_consent", { enabled }); }
 
-export async function prepareGaussianPreview(projectId: string): Promise<GaussianPreviewDescriptor & { assetUrl: string }> {
-  const descriptor = await invoke<GaussianPreviewDescriptor>("prepare_gaussian_preview", { projectId });
+export async function prepareGaussianPreview(projectId: string): Promise<GaussianPreviewDescriptor & { assetUrl: string; editMaskAssetUrl: string | null }> {
+  let descriptor: GaussianPreviewDescriptor;
+  try {
+    descriptor = await invoke<GaussianPreviewDescriptor>("prepare_gaussian_preview", { projectId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const damagedEditState = message.includes("编辑") && (message.includes("位图") || message.includes("损坏") || message.includes("校验") || message.includes("数量不匹配"));
+    if (!damagedEditState) throw error;
+    const accepted = await confirm(`${message}\n\n可以清除损坏的裁切与删除记录后重新打开。原始 final.ply 不会受到影响。`, {
+      title: "编辑数据需要恢复",
+      kind: "warning",
+      okLabel: "清除编辑记录",
+      cancelLabel: "取消",
+    });
+    if (!accepted) throw error;
+    await resetGaussianEdits(projectId);
+    descriptor = await invoke<GaussianPreviewDescriptor>("prepare_gaussian_preview", { projectId });
+  }
   return {
     ...descriptor,
     assetUrl: previewAssetUrl(convertFileSrc(descriptor.assetPath), "previewSession", crypto.randomUUID()),
+    editMaskAssetUrl: descriptor.editMaskAssetPath
+      ? previewAssetUrl(convertFileSrc(descriptor.editMaskAssetPath), "editSession", crypto.randomUUID())
+      : null,
   };
 }
 export async function releaseGaussianPreview(projectId: string): Promise<void> { return invoke("release_gaussian_preview", { projectId }); }
 export async function saveGaussianTransform(projectId: string, transform: GaussianTransform): Promise<GaussianTransform> { return invoke("save_gaussian_transform", { projectId, transform }); }
-export async function exportTransformedGaussian(projectId: string, transform: GaussianTransform): Promise<GaussianExportResult> { return invoke("export_transformed_gaussian", { projectId, transform }); }
+export async function exportTransformedGaussian(projectId: string, transform: GaussianTransform, editRevision?: number): Promise<GaussianExportResult> { return invoke("export_transformed_gaussian", { projectId, transform, editRevision }); }
+export async function beginGaussianEditSave(projectId: string, crop: GaussianCrop, baseRevision: number): Promise<GaussianEditSaveSession> {
+  return invoke("begin_gaussian_edit_save", { projectId, editState: { crop, baseRevision } });
+}
+export async function commitGaussianEditSave(editId: string, mask: Uint8Array): Promise<GaussianEditState> {
+  return invoke("commit_gaussian_edit_save", mask, { headers: { "x-ooosplat-edit-id": editId } });
+}
+export async function resetGaussianEdits(projectId: string): Promise<GaussianEditState> { return invoke("reset_gaussian_edits", { projectId }); }
 export async function onGaussianExportProgress(handler: (event: GaussianExportProgress) => void): Promise<UnlistenFn> { return listen<GaussianExportProgress>("gaussian-export-progress", ({ payload }) => handler(payload)); }
 export async function beginGaussianVideoExport(projectId: string): Promise<GaussianVideoExportSession> { return invoke("begin_gaussian_video_export", { projectId }); }
 export async function commitGaussianVideoExport(exportId: string, bytes: Uint8Array): Promise<GaussianVideoExportResult> {

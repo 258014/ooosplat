@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { BoundingBox, Vec3, type Entity } from "playcanvas";
+import { BoundingBox, PROJECTION_ORTHOGRAPHIC, Vec3, type Entity } from "playcanvas";
 import { describe, expect, it, vi } from "vitest";
 import { ViewerControls } from "./ViewerControls";
 
@@ -20,18 +20,28 @@ function setup() {
     releasePointerCapture: { value: (id: number) => captures.delete(id) },
     hasPointerCapture: { value: (id: number) => captures.has(id) },
   });
-  const setPosition = vi.fn();
+  const position = new Vec3();
+  const setPosition = vi.fn((value: Vec3) => position.copy(value));
   const lookAt = vi.fn();
-  const camera = { fov: 52, aspectRatio: 1.5, nearClip: 0.01, farClip: 10_000 };
+  const camera: {
+    fov: number;
+    aspectRatio: number;
+    nearClip: number;
+    farClip: number;
+    projection?: number;
+    orthoHeight?: number;
+  } = { fov: 52, aspectRatio: 1.5, nearClip: 0.01, farClip: 10_000 };
   const entity = {
     camera,
     setPosition,
+    getPosition: () => position,
     lookAt,
     right: new Vec3(1, 0, 0),
     up: new Vec3(0, 1, 0),
   } as unknown as Entity;
-  const controls = new ViewerControls(canvas, entity);
-  return { canvas, camera, controls, setPosition, lookAt };
+  const onOrthographicViewChange = vi.fn();
+  const controls = new ViewerControls(canvas, entity, onOrthographicViewChange);
+  return { canvas, camera, controls, setPosition, lookAt, onOrthographicViewChange };
 }
 
 describe("ViewerControls", () => {
@@ -132,6 +142,44 @@ describe("ViewerControls", () => {
     expect(rotated.radius).toBeCloseTo(initial.radius);
     expect(rotated.height).toBeCloseTo(initial.height);
     expect(rotated.angleDegrees).toBeCloseTo(initial.angleDegrees + 15);
+    controls.destroy();
+  });
+
+  it("animates between orthographic editing views", () => {
+    const frames: FrameRequestCallback[] = [];
+    const request = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const cancel = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    const { camera, controls, setPosition } = setup();
+    const before = setPosition.mock.calls.length;
+
+    controls.alignOrthographic("side", new BoundingBox(new Vec3(2, 3, 4), new Vec3(5, 6, 7)));
+    expect(camera.projection).toBe(PROJECTION_ORTHOGRAPHIC);
+    expect(frames).toHaveLength(1);
+    frames.shift()?.(performance.now() + 160);
+    expect(setPosition.mock.calls.length).toBeGreaterThan(before);
+    expect(frames).toHaveLength(1);
+    frames.shift()?.(performance.now() + 1_000);
+
+    controls.destroy();
+    request.mockRestore();
+    cancel.mockRestore();
+  });
+
+  it("returns to perspective and clears the selected view when orbiting", () => {
+    const { canvas, camera, controls, onOrthographicViewChange } = setup();
+    controls.alignOrthographic("front", new BoundingBox(new Vec3(), new Vec3(2, 1, 3)), 0.85, false);
+    expect(camera.projection).toBe(PROJECTION_ORTHOGRAPHIC);
+    expect(onOrthographicViewChange).toHaveBeenLastCalledWith("front");
+
+    canvas.dispatchEvent(pointerEvent("pointerdown", 40, 40));
+    canvas.dispatchEvent(pointerEvent("pointermove", 60, 48));
+    canvas.dispatchEvent(pointerEvent("pointerup", 60, 48));
+
+    expect(camera.projection).not.toBe(PROJECTION_ORTHOGRAPHIC);
+    expect(onOrthographicViewChange).toHaveBeenLastCalledWith(null);
     controls.destroy();
   });
 

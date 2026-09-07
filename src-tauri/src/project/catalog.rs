@@ -481,6 +481,7 @@ mod tests {
             failure_message: None,
             model: "final.ply".into(),
             transform: Default::default(),
+            editing: Default::default(),
         };
         assert!(!has_project_ownership(
             &metadata,

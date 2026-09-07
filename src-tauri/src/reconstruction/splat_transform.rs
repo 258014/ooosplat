@@ -13,12 +13,48 @@ use uuid::Uuid;
 
 use crate::{
     error::{Result, SplatError},
-    project::GaussianTransform,
+    project::{GaussianCrop, GaussianTransform},
     reconstruction::ply::{inspect_gaussian_ply, PlyInfo},
 };
 
 const MAX_HEADER_BYTES: usize = 1024 * 1024;
 const ROWS_PER_CHUNK: usize = 4096;
+
+#[cfg(windows)]
+fn publish_export(source: &Path, destination: &Path) -> Result<()> {
+    use std::{iter, os::windows::ffi::OsStrExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: Both paths are owned, NUL-terminated UTF-16 buffers that remain live for the call.
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn publish_export(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::rename(source, destination)?;
+    Ok(())
+}
 
 #[derive(Debug)]
 struct PlyLayout {
@@ -254,6 +290,71 @@ fn write_float(row: &mut [u8], offset: usize, value: f64) {
     row[offset..offset + 4].copy_from_slice(&(value as f32).to_le_bytes());
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GaussianExportEdits<'a> {
+    pub crop: Option<GaussianCrop>,
+    pub deleted_mask: Option<&'a [u8]>,
+}
+
+fn is_deleted(mask: Option<&[u8]>, index: u64) -> bool {
+    mask.and_then(|bytes| bytes.get((index / 8) as usize))
+        .is_some_and(|byte| byte & (1 << (index % 8)) != 0)
+}
+
+fn transformed_engine_point(
+    row: &[u8],
+    layout: &PlyLayout,
+    transform: GaussianTransform,
+    rotation: Quaternion,
+) -> [f64; 3] {
+    let offset = |name: &str| *layout.offsets.get(name).expect("validated property");
+    let scaled = [
+        read_float(row, offset("x")) * transform.scale,
+        read_float(row, offset("y")) * transform.scale,
+        read_float(row, offset("z")) * transform.scale,
+    ];
+    let point = rotation.transform_point(scaled);
+    let ply = [
+        point[0] + transform.position[0],
+        point[1] + transform.position[1],
+        point[2] + transform.position[2],
+    ];
+    // The preview applies a 180-degree Z rotation to PLY coordinates.
+    [-ply[0], -ply[1], ply[2]]
+}
+
+fn keep_row(
+    row: &[u8],
+    index: u64,
+    layout: &PlyLayout,
+    transform: GaussianTransform,
+    rotation: Quaternion,
+    edits: GaussianExportEdits<'_>,
+) -> bool {
+    if is_deleted(edits.deleted_mask, index) {
+        return false;
+    }
+    edits.crop.is_none_or(|crop| {
+        crop.contains(transformed_engine_point(row, layout, transform, rotation))
+    })
+}
+
+fn header_with_vertex_count(header: &[u8], count: u64) -> Vec<u8> {
+    let text = String::from_utf8_lossy(header);
+    let mut replaced = false;
+    let mut output = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        if !replaced && line.trim_start().starts_with("element vertex ") {
+            let ending = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+            output.push_str(&format!("element vertex {count}{ending}"));
+            replaced = true;
+        } else {
+            output.push_str(line);
+        }
+    }
+    output.into_bytes()
+}
+
 fn transform_row(
     row: &mut [u8],
     layout: &PlyLayout,
@@ -328,6 +429,22 @@ pub fn export_transformed_ply(
     source: &Path,
     project_root: &Path,
     transform: GaussianTransform,
+    progress: impl FnMut(u64, u64),
+) -> Result<(PathBuf, PlyInfo)> {
+    export_transformed_ply_with_edits(
+        source,
+        project_root,
+        transform,
+        GaussianExportEdits::default(),
+        progress,
+    )
+}
+
+pub fn export_transformed_ply_with_edits(
+    source: &Path,
+    project_root: &Path,
+    transform: GaussianTransform,
+    edits: GaussianExportEdits<'_>,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<(PathBuf, PlyInfo)> {
     let transform = transform.validate()?;
@@ -335,19 +452,35 @@ pub fn export_transformed_ply(
     let source = std::fs::canonicalize(source)?;
     let mut reader = BufReader::new(File::open(&source)?);
     let layout = parse_layout(&mut reader)?;
+    if let Some(mask) = edits.deleted_mask {
+        let expected = usize::try_from(layout.count.div_ceil(8))
+            .map_err(|_| SplatError::Process("Gaussian 删除位图过大".into()))?;
+        if mask.len() != expected {
+            return Err(SplatError::Process(
+                "Gaussian 删除位图与源 PLY 数量不一致".into(),
+            ));
+        }
+    }
     let sh_rotation = ShRotation::new(rotation.matrix());
 
-    let output = (1_u32..10_000)
-        .map(|suffix| {
-            if suffix == 1 {
-                project_root.join("edited.ply")
-            } else {
-                project_root.join(format!("edited-{suffix}.ply"))
-            }
-        })
-        .find(|candidate| !candidate.exists())
-        .ok_or_else(|| SplatError::Process("项目中已存在过多 edited PLY 文件".into()))?;
-    let temporary = project_root.join(format!(".edited-{}.ply.tmp", Uuid::new_v4()));
+    let mut retained = 0_u64;
+    let mut row = vec![0_u8; layout.stride];
+    for index in 0..layout.count {
+        reader.read_exact(&mut row)?;
+        if keep_row(&row, index, &layout, transform, rotation, edits) {
+            retained += 1;
+        }
+    }
+    if retained == 0 {
+        return Err(SplatError::Process(
+            "当前裁切和删除状态没有保留任何 Gaussian，无法导出".into(),
+        ));
+    }
+    reader = BufReader::new(File::open(&source)?);
+    let layout = parse_layout(&mut reader)?;
+
+    let output = project_root.join("edit.ply");
+    let temporary = project_root.join(format!(".edit-{}.ply.tmp", Uuid::new_v4()));
 
     let result = (|| -> Result<()> {
         let file = OpenOptions::new()
@@ -355,17 +488,24 @@ pub fn export_transformed_ply(
             .write(true)
             .open(&temporary)?;
         let mut writer = BufWriter::new(file);
-        writer.write_all(&layout.header)?;
+        writer.write_all(&header_with_vertex_count(&layout.header, retained))?;
         let mut rows_done = 0_u64;
         let mut chunk = vec![0_u8; layout.stride * ROWS_PER_CHUNK];
+        let mut output_chunk = Vec::with_capacity(layout.stride * ROWS_PER_CHUNK);
         while rows_done < layout.count {
             let rows = ((layout.count - rows_done) as usize).min(ROWS_PER_CHUNK);
             let bytes = rows * layout.stride;
             reader.read_exact(&mut chunk[..bytes])?;
-            for row in chunk[..bytes].chunks_exact_mut(layout.stride) {
+            output_chunk.clear();
+            for (chunk_index, row) in chunk[..bytes].chunks_exact_mut(layout.stride).enumerate() {
+                let index = rows_done + chunk_index as u64;
+                if !keep_row(row, index, &layout, transform, rotation, edits) {
+                    continue;
+                }
                 transform_row(row, &layout, transform, rotation, &sh_rotation)?;
+                output_chunk.extend_from_slice(row);
             }
-            writer.write_all(&chunk[..bytes])?;
+            writer.write_all(&output_chunk)?;
             rows_done += rows as u64;
             progress(rows_done, layout.count);
         }
@@ -373,7 +513,6 @@ pub fn export_transformed_ply(
         writer.flush()?;
         writer.get_ref().sync_all()?;
         drop(writer);
-        std::fs::rename(&temporary, &output)?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -381,10 +520,20 @@ pub fn export_transformed_ply(
         return Err(error);
     }
 
-    let info = inspect_gaussian_ply(&output)?;
-    if info.splat_count != layout.count {
-        let _ = std::fs::remove_file(&output);
+    let info = match inspect_gaussian_ply(&temporary) {
+        Ok(info) => info,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
+    if info.splat_count != retained {
+        let _ = std::fs::remove_file(&temporary);
         return Err(SplatError::Process("导出 PLY 的 Splat 数量校验失败".into()));
+    }
+    if let Err(error) = publish_export(&temporary, &output) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
     }
     Ok((output, info))
 }
@@ -613,26 +762,33 @@ fn build_band3(s: &[[f64; 3]; 3], b: &[[f64; 5]; 5]) -> [[f64; 7]; 7] {
 mod tests {
     use super::*;
 
-    fn write_fixture(path: &Path) {
+    fn write_fixture_rows(path: &Path, positions: &[[f32; 3]]) {
         let properties = [
             "f_dc_0", "x", "rot_0", "scale_0", "y", "f_dc_1", "rot_1", "scale_1", "z", "f_dc_2",
             "rot_2", "scale_2", "opacity", "rot_3",
         ];
         let mut bytes = format!(
-            "ply\nformat binary_little_endian 1.0\nelement vertex 1\n{}end_header\n",
+            "ply\nformat binary_little_endian 1.0\nelement vertex {}\n{}end_header\n",
+            positions.len(),
             properties
                 .iter()
                 .map(|name| format!("property float {name}\n"))
                 .collect::<String>()
         )
         .into_bytes();
-        let values = [
-            0.1_f32, 1.0, 1.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 1.0, 0.0,
-        ];
-        for value in values {
-            bytes.extend_from_slice(&value.to_le_bytes());
+        for [x, y, z] in positions {
+            let values = [
+                0.1_f32, *x, 1.0, 0.0, *y, 0.2, 0.0, 0.0, *z, 0.3, 0.0, 0.0, 1.0, 0.0,
+            ];
+            for value in values {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_fixture(path: &Path) {
+        write_fixture_rows(path, &[[1.0, 0.0, 0.0]]);
     }
 
     #[test]
@@ -685,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn streams_reordered_properties_and_auto_numbers_exports() {
+    fn streams_reordered_properties_and_replaces_the_single_edit_export() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("final.ply");
         write_fixture(&source);
@@ -699,8 +855,8 @@ mod tests {
             export_transformed_ply(&source, directory.path(), transform, |_, _| {}).unwrap();
         let (second, _) =
             export_transformed_ply(&source, directory.path(), transform, |_, _| {}).unwrap();
-        assert_eq!(first.file_name().unwrap(), "edited.ply");
-        assert_eq!(second.file_name().unwrap(), "edited-2.ply");
+        assert_eq!(first.file_name().unwrap(), "edit.ply");
+        assert_eq!(second.file_name().unwrap(), "edit.ply");
         assert_eq!(info.splat_count, 1);
         assert_eq!(std::fs::read(&source).unwrap(), original);
 
@@ -715,5 +871,41 @@ mod tests {
         assert!((get("scale_0") - 2.0_f64.ln()).abs() < 1e-5);
         assert!((get("rot_0") - 0.5_f64.sqrt()).abs() < 1e-5);
         assert!((get("rot_3") - 0.5_f64.sqrt()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn filters_deleted_and_cropped_rows_without_changing_the_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("final.ply");
+        write_fixture_rows(
+            &source,
+            &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+        );
+        let original = std::fs::read(&source).unwrap();
+        let deleted = [0b0000_0001];
+        let edits = GaussianExportEdits {
+            crop: Some(GaussianCrop::Box {
+                center: [-1.0, 0.0, 0.0],
+                size: [3.0, 1.0, 1.0],
+            }),
+            deleted_mask: Some(&deleted),
+        };
+        let (output, info) = export_transformed_ply_with_edits(
+            &source,
+            directory.path(),
+            GaussianTransform::default(),
+            edits,
+            |_, _| {},
+        )
+        .unwrap();
+
+        assert_eq!(info.splat_count, 1);
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        let mut reader = BufReader::new(File::open(output).unwrap());
+        let layout = parse_layout(&mut reader).unwrap();
+        assert_eq!(layout.count, 1);
+        let mut row = vec![0_u8; layout.stride];
+        reader.read_exact(&mut row).unwrap();
+        assert!((read_float(&row, layout.offsets["x"]) - 2.0).abs() < 1e-5);
     }
 }

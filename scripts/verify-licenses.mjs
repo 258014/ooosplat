@@ -192,7 +192,7 @@ for (const marker of [
   assertContains(thirdParty, marker, "THIRD_PARTY_NOTICES.txt");
 }
 
-for (const component of ["PlayCanvas Engine", "PlayCanvas React", "PlayCanvas splat-transform (adapted algorithm)"]) {
+for (const component of ["PlayCanvas Engine", "PlayCanvas React", "PlayCanvas splat-transform (adapted algorithm)", "SuperSplat selection workflow (adapted algorithm)"]) {
   assertContains(thirdParty, component, "THIRD_PARTY_NOTICES.txt");
 }
 assertContains(thirdParty, "licenses/PlayCanvas-MIT.txt", "THIRD_PARTY_NOTICES.txt");

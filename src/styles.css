@@ -16,6 +16,7 @@
   --green: #2d9965;
   --amber: #c78314;
   --red: #b04a40;
+  --font-sans: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -255,15 +256,32 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .preview-mode-toggle button.active { color: #fff; }
 .preview-mode-toggle button:focus-visible { outline: 2px solid #89a9ff; outline-offset: 3px; }
 .preview-mode-toggle button:disabled { cursor: default; opacity: .58; }
-.preview-input-hints { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 15px; color: #697489; }
+.preview-view-control { height: 34px; display: grid; grid-template-columns: repeat(3, 72px); overflow: hidden; background: #f8fafc; border: 1px solid #bdc8d8; border-radius: 5px; }
+.preview-view-control button { min-width: 0; padding: 0 12px; color: #536077; background: transparent; border: 0; border-right: 1px solid #d0d7e2; cursor: pointer; font: 650 11px/1 var(--font-sans); white-space: nowrap; }
+.preview-view-control button:last-child { border-right: 0; }
+.preview-view-control button:hover:not(:disabled) { color: var(--blue); background: #e2e9f7; }
+.preview-view-control button.active { color: #174acb; background: #e7eeff; box-shadow: inset 0 -2px 0 var(--blue); }
+.preview-view-control button:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.preview-view-control button:disabled { opacity: .45; cursor: default; }
+.preview-input-hints { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px 13px; color: #697489; }
 .preview-input-hints span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 10px; font-weight: 600; }
 .preview-input-hints svg { color: #48607f; stroke-width: 1.7; }
-.preview-commandbar { flex: 0 0 44px; padding: 5px 18px; display: flex; align-items: center; justify-content: flex-end; background: #eef1f5; border-bottom: 1px solid var(--line-dark); }
+.preview-input-hints kbd { padding: 0; color: #42516a; background: transparent; border: 0; font: 700 10px/1 "Cascadia Mono", "Microsoft YaHei UI", monospace; }
+.preview-commandbar { flex: 0 0 44px; padding: 5px 18px; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 12px; background: #eef1f5; border-bottom: 1px solid var(--line-dark); }
+.preview-commandbar-left { min-width: 0; display: flex; align-items: center; justify-self: start; }
+.preview-commandbar-center { grid-column: 2; display: flex; align-items: center; justify-self: center; }
+.preview-editor-tools { display: inline-flex; align-items: center; min-width: 0; border: 1px solid #bdc8d8; border-radius: 5px; overflow: hidden; background: #f8fafc; }
+.preview-editor-tools button { min-height: 34px; padding: 0 11px; display: inline-flex; align-items: center; gap: 6px; border: 0; border-right: 1px solid #d0d7e2; background: transparent; color: #536077; font: 650 11px/1 var(--font-sans); cursor: pointer; }
+.preview-editor-tools button:last-child { border-right: 0; }
+.preview-editor-tools button.active { color: #174acb; background: #e7eeff; box-shadow: inset 0 -2px 0 var(--blue); }
+.preview-editor-tools button:hover:not(:disabled) { color: var(--blue); background: #eef3ff; }
+.preview-editor-tools button:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.preview-editor-tools button:disabled { opacity: .45; cursor: default; }
 .preview-header-actions button {
   min-height: 34px; padding: 0 11px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  color: #526078; background: transparent; border: 1px solid var(--line-dark); cursor: pointer; font-size: 11px; font-weight: 650;
+  color: #526078; background: transparent; border: 1px solid var(--line-dark); cursor: pointer; font: 650 11px/1 var(--font-sans);
 }
-.preview-header-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.preview-header-actions { grid-column: 3; display: flex; align-items: center; justify-self: end; gap: 6px; }
 .preview-header-actions button:hover:not(:disabled) { color: var(--blue); border-color: #9eb6fb; background: #edf2ff; }
 .preview-header-actions button:disabled { opacity: .42; cursor: default; }
 .preview-header-actions .video-cancel { color: #9b4038; border-color: #d7a8a3; }
@@ -271,6 +289,10 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .preview-editor { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #0e1117; }
 .gaussian-viewport { position: absolute; inset: 0; min-width: 0; min-height: 0; overflow: hidden; background: #0e1117; }
 .gaussian-canvas, .gaussian-viewport canvas { display: block; width: 100% !important; height: 100% !important; outline: none; touch-action: none; }
+.gaussian-viewport.tool-rectangle canvas { cursor: crosshair; }
+.rectangle-selection-box { position: fixed; z-index: 18; pointer-events: none; border: 1px solid #4f7dff; background: rgba(30, 92, 255, .14); box-shadow: 0 0 0 1px rgba(8, 16, 31, .3); }
+.rectangle-selection-box.mode-add { border-color: #36b87c; background: rgba(54, 184, 124, .14); }
+.rectangle-selection-box.mode-remove { border-color: #ef6262; background: rgba(239, 98, 98, .14); }
 .portrait-capture-guide, .portrait-matte {
   position: absolute; top: 50%; left: 50%; z-index: 2; height: calc(100% - 28px); max-width: calc(100% - 28px); aspect-ratio: 9 / 16;
   transform: translate(-50%, -50%); pointer-events: none;
@@ -317,6 +339,16 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .transform-panel section:last-child { border-bottom: 0; }
 .transform-panel h4 { margin: 0 0 9px; color: #515d70; font-size: 10px; }
 .transform-panel section > p { margin: 7px 0 0 23px; color: var(--faint); font: 8px/1 "Cascadia Mono", monospace; letter-spacing: .08em; }
+.selection-panel { width: 258px; }
+.selection-empty { padding: 14px 13px 13px; }
+.selection-empty p { margin: 0; color: #727e91; font-size: 9px; line-height: 1.65; }
+.selection-empty button { width: 100%; height: 32px; margin-top: 12px; color: #fff; background: var(--blue); border: 1px solid var(--blue-dark); cursor: pointer; font-size: 10px; font-weight: 700; }
+.selection-empty button:hover { background: var(--blue-dark); }
+.selection-count { color: #f3c84c !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-editor-tools button, .preview-view-control button { transition: none !important; }
+}
 .transform-fields { display: grid; gap: 6px; }
 .transform-field { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 5px; color: #7b8698; font: 650 9px/1 "Cascadia Mono", monospace; }
 .transform-scrubber {
@@ -335,10 +367,24 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .preview-statusbar .export-result { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
 .statusbar-file-action { height: 22px; padding: 0 5px; display: inline-flex; align-items: center; gap: 5px; color: #aeb9ca; background: transparent; border: 1px solid #47546b; cursor: pointer; font: inherit; }
 .statusbar-file-action:hover { color: #fff; border-color: #6f91df; }
-.preview-save-error { flex: 0 0 auto; padding: 6px 10px; color: #8b2e28; background: #ffe9e6; border-top: 1px solid #e5b6b1; font-size: 9px; }
+.preview-save-error { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 6px 10px; color: #8b2e28; background: #ffe9e6; border-top: 1px solid #e5b6b1; font-size: 9px; }
+.preview-save-error button { border: 1px solid #b86b64; background: transparent; color: inherit; padding: 2px 7px; cursor: pointer; }
 .preview-video-message { flex: 0 0 auto; padding: 6px 10px; border-top: 1px solid; font-size: 9px; }
 .preview-video-message.warning { color: #7c5618; background: #fff5dc; border-color: #e2cf9f; }
 .preview-video-message.error { color: #8b2e28; background: #ffe9e6; border-color: #e5b6b1; }
+.gaussian-save-backdrop { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 24px; background: rgba(8, 14, 25, .58); backdrop-filter: blur(3px); }
+.gaussian-save-dialog { width: min(460px, calc(100vw - 48px)); padding: 20px; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 14px; color: #263249; background: #f6f8fb; border: 1px solid #b8c3d2; box-shadow: 0 26px 70px rgba(4, 11, 23, .38); }
+.gaussian-save-symbol { width: 42px; height: 42px; display: grid; place-items: center; color: #1e5cff; background: #e5edff; border: 1px solid #c2d2ff; }
+.gaussian-save-dialog h2 { margin: 2px 0 8px; font: 700 17px/1.2 var(--font-sans); }
+.gaussian-save-dialog p { margin: 0; color: #667287; font-size: 11px; line-height: 1.7; }
+.gaussian-save-dialog p b { color: #344158; font-family: "Cascadia Mono", monospace; }
+.gaussian-save-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 7px; padding-top: 4px; }
+.gaussian-save-actions button { min-height: 34px; padding: 0 13px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid; cursor: pointer; font-size: 11px; font-weight: 700; }
+.gaussian-save-actions button:disabled { opacity: .5; cursor: default; }
+.gaussian-save-actions .secondary { color: #5b677a; background: transparent; border-color: #bdc6d3; }
+.gaussian-save-actions .secondary:hover:not(:disabled) { color: #263249; background: #e9edf3; }
+.gaussian-save-actions .primary { color: #fff; background: var(--blue); border-color: var(--blue-dark); }
+.gaussian-save-actions .primary:hover:not(:disabled) { background: var(--blue-dark); }
 
 .privacy-backdrop { position: fixed; inset: 0; z-index: 100; padding: 24px; display: grid; place-items: center; background: rgba(18, 25, 38, .48); backdrop-filter: blur(3px); }
 .privacy-dialog { width: min(620px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow-y: auto; color: var(--ink); background: #f8f9fb; border: 1px solid #bfc7d3; box-shadow: 0 28px 80px rgba(9, 17, 31, .28); }

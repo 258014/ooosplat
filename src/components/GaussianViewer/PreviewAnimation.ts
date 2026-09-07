@@ -86,6 +86,22 @@ uniform float uOoosplatAnimationTime;
 uniform vec3 uOoosplatEffectCenter;
 uniform vec3 uOoosplatEffectExtent;
 uniform float uOoosplatEffectRadialLimit;
+uniform float uOoosplatCropKind;
+uniform vec3 uOoosplatCropCenter;
+uniform vec3 uOoosplatCropSize;
+uniform float uOoosplatCropRadius;
+uniform float uOoosplatShowSelection;
+
+bool ooosplatCropContains(vec3 center) {
+    if (uOoosplatCropKind < 0.5) return true;
+    if (uOoosplatCropKind < 1.5) return distance(center, uOoosplatCropCenter) <= uOoosplatCropRadius;
+    return all(lessThanEqual(abs(center - uOoosplatCropCenter), uOoosplatCropSize * 0.5));
+}
+
+bool ooosplatIsDeletedOrCropped(vec3 center) {
+    // Unified GSplat passes work-buffer centers in world space.
+    return loadOoosplatDeleted().r > 0.5 || !ooosplatCropContains(center);
+}
 
 vec3 ooosplatParticleHash(vec3 p) {
     return fract(sin(p * 123.456) * 123.456);
@@ -143,6 +159,10 @@ void modifySplatRotationScale(
     inout vec4 rotation,
     inout vec3 scale
 ) {
+    if (ooosplatIsDeletedOrCropped(originalCenter)) {
+        scale = vec3(0.0);
+        return;
+    }
     if (uOoosplatAnimationEnabled < 0.5 || uOoosplatAnimationTime >= 13.0) return;
     vec3 seed = ooosplatParticleHash(originalCenter + vec3(17.23, 3.31, 41.7));
     float keep = step(seed.x, 0.16);
@@ -157,6 +177,14 @@ void modifySplatRotationScale(
 }
 
 void modifySplatColor(vec3 center, inout vec4 color) {
+    if (loadOoosplatDeleted().r > 0.5) {
+        color.a = 0.0;
+        return;
+    }
+    if (uOoosplatShowSelection > 0.5 && loadOoosplatSelected().r > 0.5) {
+        color.rgb = mix(color.rgb, vec3(1.0, 0.78, 0.05), 0.9);
+        color.a = max(color.a, 0.72);
+    }
     if (uOoosplatAnimationEnabled < 0.5 || uOoosplatAnimationTime >= 13.0) return;
     // center is the already modified work-buffer center. Hashing it here would generate a new
     // random keep/discard result every frame as particles drift, which appears as rapid flicker.

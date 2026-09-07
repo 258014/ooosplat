@@ -97,6 +97,17 @@ License: MIT
 License text: licenses/PlayCanvas-MIT.txt
 Upstream source: https://github.com/playcanvas/splat-transform/tree/v3.3.0
 
+SuperSplat selection workflow (adapted algorithm)
+-------------------------------------------------
+Version referenced: source revision available from the upstream main branch
+Use: OOOSplat adapts the GPU center-projection selection, selection-mask
+     combination, and serialized selection-operation concepts for its embedded
+     rectangle Gaussian editor. SuperSplat itself and its editor UI are not
+     bundled at runtime.
+License: MIT
+License text: licenses/PlayCanvas-MIT.txt
+Upstream source: https://github.com/playcanvas/supersplat
+
 Mediabunny
 ----------
 Version: 1.52.3

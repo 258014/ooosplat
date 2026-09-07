@@ -4,6 +4,6 @@ pub mod metadata;
 
 pub use manager::{ProjectManager, ProjectPaths};
 pub use metadata::{
-    FrameState, GaussianTransform, PipelineStateFile, ProjectMetadata, ProjectOutput,
-    ProjectStatus, PROJECT_APP_ID,
+    FrameState, GaussianCrop, GaussianEditing, GaussianTransform, PipelineStateFile,
+    ProjectMetadata, ProjectOutput, ProjectStatus, PROJECT_APP_ID,
 };

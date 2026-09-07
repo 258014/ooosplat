@@ -186,7 +186,7 @@ foreach ($marker in "macOS 15+ Apple Silicon arm64", "ffmpeg-8.1.2.tar.xz", "COL
     Assert-Contains $thirdParty $marker "THIRD_PARTY_NOTICES.txt"
 }
 
-foreach ($component in "PlayCanvas Engine", "PlayCanvas React", "PlayCanvas splat-transform (adapted algorithm)") {
+foreach ($component in "PlayCanvas Engine", "PlayCanvas React", "PlayCanvas splat-transform (adapted algorithm)", "SuperSplat selection workflow (adapted algorithm)") {
     Assert-Contains $thirdParty $component "THIRD_PARTY_NOTICES.txt"
 }
 Assert-Contains $thirdParty "licenses/PlayCanvas-MIT.txt" "THIRD_PARTY_NOTICES.txt"

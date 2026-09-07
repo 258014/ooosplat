@@ -52,6 +52,85 @@ impl GaussianTransform {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GaussianCrop {
+    Sphere { center: [f64; 3], radius: f64 },
+    Box { center: [f64; 3], size: [f64; 3] },
+}
+
+impl GaussianCrop {
+    pub fn validate(self) -> crate::error::Result<Self> {
+        let valid_vector = |values: &[f64; 3]| values.iter().all(|value| value.is_finite());
+        let valid_extent = |value: f64| value.is_finite() && (0.000_001..=1.0e12).contains(&value);
+        let valid = match self {
+            Self::Sphere { center, radius } => valid_vector(&center) && valid_extent(radius),
+            Self::Box { center, size } => {
+                valid_vector(&center) && size.iter().all(|value| valid_extent(*value))
+            }
+        };
+        if !valid {
+            return Err(crate::error::SplatError::Process(
+                "Gaussian 裁切区域包含无效的位置或尺寸".into(),
+            ));
+        }
+        Ok(self)
+    }
+
+    pub fn contains(self, point: [f64; 3]) -> bool {
+        match self {
+            Self::Sphere { center, radius } => {
+                point
+                    .iter()
+                    .zip(center)
+                    .map(|(value, origin)| (value - origin).powi(2))
+                    .sum::<f64>()
+                    <= radius * radius
+            }
+            Self::Box { center, size } => point
+                .iter()
+                .zip(center)
+                .zip(size)
+                .all(|((value, origin), extent)| (value - origin).abs() <= extent * 0.5),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GaussianEditing {
+    #[serde(default)]
+    pub crop: Option<GaussianCrop>,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub source_splat_count: u64,
+    #[serde(default)]
+    pub deleted_count: u64,
+}
+
+impl GaussianEditing {
+    pub fn validate(self, expected_splats: u64) -> crate::error::Result<Self> {
+        if self.source_splat_count != 0 && self.source_splat_count != expected_splats {
+            return Err(crate::error::SplatError::Process(
+                "编辑状态与当前 Gaussian 文件的 Splat 数量不一致".into(),
+            ));
+        }
+        if self.deleted_count > expected_splats {
+            return Err(crate::error::SplatError::Process(
+                "编辑状态中的删除数量无效".into(),
+            ));
+        }
+        if let Some(crop) = self.crop {
+            crop.validate()?;
+        }
+        Ok(Self {
+            source_splat_count: expected_splats,
+            ..self
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectStatus {
@@ -108,10 +187,12 @@ pub struct ProjectMetadata {
     pub model: String,
     #[serde(default)]
     pub transform: GaussianTransform,
+    #[serde(default)]
+    pub editing: GaussianEditing,
 }
 
 pub const fn schema_version() -> u32 {
-    3
+    4
 }
 
 fn default_model() -> String {
@@ -221,6 +302,7 @@ mod tests {
         let metadata: ProjectMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(metadata.model, "final.ply");
         assert_eq!(metadata.transform, GaussianTransform::default());
+        assert_eq!(metadata.editing, GaussianEditing::default());
         assert_eq!(metadata.schema_version, 2);
     }
 
@@ -237,6 +319,29 @@ mod tests {
             ..GaussianTransform::default()
         }
         .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn validates_crop_and_edit_counts() {
+        let crop = GaussianCrop::Sphere {
+            center: [0.0, 1.0, 2.0],
+            radius: 4.0,
+        };
+        assert!(crop.validate().is_ok());
+        assert!(GaussianCrop::Box {
+            center: [0.0; 3],
+            size: [1.0, 0.0, 1.0],
+        }
+        .validate()
+        .is_err());
+        assert!(GaussianEditing {
+            crop: Some(crop),
+            revision: 1,
+            source_splat_count: 9,
+            deleted_count: 10,
+        }
+        .validate(9)
         .is_err());
     }
 }
