@@ -6,7 +6,10 @@ use uuid::Uuid;
 use crate::{
     error::{Result, SplatError},
     presets::Quality,
-    project::{catalog, PipelineStateFile, ProjectMetadata, ProjectStatus, PROJECT_APP_ID},
+    project::{
+        catalog, PipelineStateFile, ProjectInputType, ProjectMetadata, ProjectStatus,
+        PROJECT_APP_ID,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -89,16 +92,29 @@ impl ProjectManager {
 
     pub async fn create(
         &self,
-        source_video: &Path,
+        input: &Path,
         quality: Quality,
     ) -> Result<(ProjectPaths, ProjectMetadata)> {
-        validate_video_path(source_video)?;
+        let input_type = if input.is_dir() {
+            crate::video::analyze_image_sequence(input)?;
+            ProjectInputType::Images
+        } else {
+            validate_video_path(input)?;
+            ProjectInputType::Video
+        };
         Self::validate_root(&self.projects_root).await?;
         let id = Uuid::new_v4();
-        let stem = source_video
-            .file_stem()
-            .and_then(|v| v.to_str())
-            .unwrap_or("project");
+        let stem = if input_type == ProjectInputType::Images {
+            input
+                .file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or("images")
+        } else {
+            input
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .unwrap_or("project")
+        };
         let base = format!(
             "{}_{}",
             Local::now().format("%Y%m%d-%H%M%S"),
@@ -115,13 +131,24 @@ impl ProjectManager {
         for directory in [&source, &frames, &colmap, &brush, &logs] {
             tokio::fs::create_dir_all(directory).await?;
         }
-        let extension = source_video
-            .extension()
-            .and_then(|v| v.to_str())
-            .unwrap_or("mp4")
-            .to_ascii_lowercase();
-        let stored_source = source.join(format!("input.{extension}"));
-        tokio::fs::copy(source_video, &stored_source).await?;
+        let stored_source = if input_type == ProjectInputType::Images {
+            let images_dir = source.join("images");
+            tokio::fs::create_dir_all(&images_dir).await?;
+            for (index, path) in crate::video::list_images(input)?.iter().enumerate() {
+                let dest = images_dir.join(crate::video::normalized_image_name(index, path)?);
+                tokio::fs::copy(&path, &dest).await?;
+            }
+            images_dir
+        } else {
+            let extension = input
+                .extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or("mp4")
+                .to_ascii_lowercase();
+            let stored = source.join(format!("input.{extension}"));
+            tokio::fs::copy(input, &stored).await?;
+            stored
+        };
         let now = Utc::now();
         let metadata = ProjectMetadata {
             schema_version: crate::project::metadata::schema_version(),
@@ -134,6 +161,7 @@ impl ProjectManager {
             duration_ms: None,
             status: ProjectStatus::Running,
             source_path: stored_source,
+            input_type,
             quality,
             project_path: project.clone(),
             output_path: None,
@@ -146,7 +174,7 @@ impl ProjectManager {
         let metadata_path = project.join("project.json");
         atomic_write_json(&metadata_path, &metadata).await?;
         let state = project.join("state.json");
-        atomic_write_json(&state, &PipelineStateFile::created(quality)).await?;
+        atomic_write_json(&state, &PipelineStateFile::created_for(quality, input_type)).await?;
         if self.register_in_catalog {
             catalog::register_project(id, &project).await?;
         }
@@ -383,5 +411,29 @@ mod tests {
         assert!(metadata.source_path.is_file());
         assert_eq!(paths.output, paths.project);
         assert!(paths.state.is_file());
+    }
+
+    #[tokio::test]
+    async fn copies_image_sequences_with_stable_names() {
+        let temporary = tempfile::tempdir().unwrap();
+        let input = temporary.path().join("图片序列");
+        std::fs::create_dir(&input).unwrap();
+        image::RgbImage::new(2, 2)
+            .save(input.join("image10.jpg"))
+            .unwrap();
+        image::RgbImage::new(2, 2)
+            .save(input.join("image2.png"))
+            .unwrap();
+        let (paths, metadata) = ProjectManager::for_diagnostics(temporary.path().join("projects"))
+            .create(&input, Quality::Balanced)
+            .await
+            .unwrap();
+        assert_eq!(metadata.input_type, ProjectInputType::Images);
+        assert!(metadata.source_path.is_dir());
+        assert!(metadata.source_path.join("frame_000001.png").is_file());
+        assert!(metadata.source_path.join("frame_000002.jpg").is_file());
+        let state: PipelineStateFile =
+            serde_json::from_slice(&tokio::fs::read(paths.state).await.unwrap()).unwrap();
+        assert_eq!(state.input_type, ProjectInputType::Images);
     }
 }

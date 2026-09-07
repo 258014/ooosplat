@@ -30,6 +30,14 @@ export interface VideoInfo {
   pixelFormat: string;
   hasAlpha: boolean;
 }
+export type InputType = "video" | "images";
+export interface ImageSequenceInfo {
+  imageCount: number;
+  width: number;
+  height: number;
+  hasAlpha: boolean;
+  requiresLargeSequenceConfirmation: boolean;
+}
 export interface FramePlan { retentionRatio: number; samplingFps: number; estimatedFrames: number; }
 export interface RuntimeEstimate {
   estimatedMs: number;
@@ -38,6 +46,13 @@ export interface RuntimeEstimate {
   confidence: "low" | "medium" | "high";
   sampleCount: number;
   basis: string;
+}
+export interface ProbeAndPlan {
+  inputType: InputType;
+  video: VideoInfo | null;
+  imageSequence: ImageSequenceInfo | null;
+  plan: FramePlan;
+  estimate: RuntimeEstimate;
 }
 
 export interface PipelineEvent {

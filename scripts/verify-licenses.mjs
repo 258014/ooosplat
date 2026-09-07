@@ -213,6 +213,16 @@ const mediabunnyLicense = readText("licenses/Mediabunny-MPL-2.0.txt");
 assertContains(mediabunnyLicense, "Mozilla Public License Version 2.0", "Mediabunny license");
 assertContains(mediabunnyLicense, "2. License Grants and Conditions", "Mediabunny license");
 
+for (const marker of [
+  "image crate",
+  "0.25.10",
+  "MIT OR Apache-2.0",
+  "https://github.com/image-rs/image/tree/v0.25.10",
+]) {
+  assertContains(thirdParty, marker, "THIRD_PARTY_NOTICES.txt");
+}
+assertContains(readText("src-tauri/Cargo.toml"), 'image = { version = "0.25"', "Cargo.toml");
+
 const ffmpegLicense = readText("licenses/FFmpeg-LGPL-2.1.txt");
 assertContains(ffmpegLicense, "GNU LESSER GENERAL PUBLIC LICENSE", "FFmpeg license");
 assertContains(ffmpegLicense, "Version 2.1, February 1999", "FFmpeg license");

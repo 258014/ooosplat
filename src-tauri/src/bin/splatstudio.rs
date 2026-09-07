@@ -7,7 +7,10 @@ use ooo_splat::{
     pipeline::runner::{default_engine_paths, PipelineRunner},
     presets::Quality,
     process::ProcessManager,
-    video::{FrameSelectionStrategy, UniformRatioFrameSelection},
+    video::{
+        analyze_image_sequence, create_image_plan, prepare_image_sequence, FrameSelectionStrategy,
+        UniformRatioFrameSelection,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -24,15 +27,15 @@ struct Cli {
 enum Commands {
     /// Validate FFmpeg, FFprobe, CPU COLMAP and Brush.
     Health,
-    /// Read video metadata through FFprobe JSON.
+    /// Read video metadata or image-sequence information.
     Probe { input: PathBuf },
-    /// Show the uniform frame plan without extracting images.
+    /// Show the video frame plan or image-sequence plan.
     Plan {
         input: PathBuf,
         #[arg(long, value_enum, default_value_t = Quality::Balanced)]
         quality: Quality,
     },
-    /// Extract uniformly sampled frames and, for alpha video, COLMAP masks.
+    /// Prepare video frames or an image sequence and optional COLMAP masks.
     Extract {
         input: PathBuf,
         output: PathBuf,
@@ -72,12 +75,23 @@ async fn execute(cli: Cli) -> Result<()> {
             );
         }
         Commands::Probe { input } => {
-            let video = probe_video(&engines.ffprobe, &input, None).await?;
-            println!("{}", serde_json::to_string_pretty(&video)?);
+            if input.is_dir() {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&analyze_image_sequence(&input)?)?
+                );
+            } else {
+                let video = probe_video(&engines.ffprobe, &input, None).await?;
+                println!("{}", serde_json::to_string_pretty(&video)?);
+            }
         }
         Commands::Plan { input, quality } => {
-            let video = probe_video(&engines.ffprobe, &input, None).await?;
-            let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
+            let plan = if input.is_dir() {
+                create_image_plan(&analyze_image_sequence(&input)?, &quality.preset())
+            } else {
+                let video = probe_video(&engines.ffprobe, &input, None).await?;
+                UniformRatioFrameSelection.create_plan(&video, &quality.preset())
+            };
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
         Commands::Extract {
@@ -85,14 +99,25 @@ async fn execute(cli: Cli) -> Result<()> {
             output,
             quality,
         } => {
-            ensure_engine(&engines.ffprobe)?;
-            ensure_engine(&engines.ffmpeg)?;
-            let video = probe_video(&engines.ffprobe, &input, None).await?;
-            let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
             let masks = output
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join("masks");
+            if input.is_dir() {
+                let extraction = prepare_image_sequence(&input, &output, &masks)?;
+                println!(
+                    "prepared {} images in {} and {} masks in {}",
+                    extraction.image_count,
+                    output.display(),
+                    extraction.mask_count,
+                    masks.display()
+                );
+                return Ok(());
+            }
+            ensure_engine(&engines.ffprobe)?;
+            ensure_engine(&engines.ffmpeg)?;
+            let video = probe_video(&engines.ffprobe, &input, None).await?;
+            let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
             let extraction = extract_uniform_frames(
                 &engines.ffmpeg,
                 &input,

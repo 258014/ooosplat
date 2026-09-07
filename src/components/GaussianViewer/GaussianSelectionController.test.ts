@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { combineSelectionMasks, packSelectionTextureData } from "./GaussianSelectionController";
+import { combineDeletedMasks, combineSelectionMasks, packSelectionTextureData } from "./GaussianSelectionController";
 
 const processorState = vi.hoisted(() => ({ hits: [] as Uint8Array[] }));
 
@@ -52,6 +52,13 @@ describe("GaussianSelectionController mask helpers", () => {
     expect([...combineSelectionMasks(current, hit, "remove")]).toEqual([0b00100000]);
   });
 
+  it("merges newly cropped splats into the persistent deletion mask", () => {
+    expect([...combineDeletedMasks(
+      new Uint8Array([0b00000010]),
+      new Uint8Array([0b00000101]),
+    )]).toEqual([0b00000111]);
+  });
+
   it("uploads every consecutive rectangle selection to the yellow selection texture", async () => {
     const { GaussianSelectionController } = await import("./GaussianSelectionController");
     const textures = {
@@ -90,6 +97,38 @@ describe("GaussianSelectionController mask helpers", () => {
 
     expect(textures.ooosplatSelected.unlock).toHaveBeenCalledTimes(5);
     expect(requestRender).toHaveBeenCalledTimes(5);
+    controller.destroy();
+  });
+
+  it("freezes crop hits into the deletion texture and clears yellow selection", async () => {
+    const { GaussianSelectionController } = await import("./GaussianSelectionController");
+    const textures = {
+      ooosplatSelected: createTexture(),
+      ooosplatDeleted: createTexture(),
+      ooosplatScratch: createTexture(),
+    };
+    const component = {
+      entity: { getWorldTransform: () => ({ data: new Float32Array(16) }) },
+      getInstanceTexture: (name: keyof typeof textures) => textures[name],
+      workBufferUpdate: "auto",
+    };
+    const controller = new GaussianSelectionController(
+      {} as never,
+      component as never,
+      { projectionMatrix: {}, camera: { viewMatrix: {} } } as never,
+      8,
+      vi.fn(),
+    );
+    processorState.hits.push(new Uint8Array([255, 0, 255, 0, 0, 0, 0, 0]));
+
+    const frozen = await controller.freezeCrop(
+      { kind: "sphere", center: [0, 0, 0], radius: 1 },
+      new Uint8Array([0b00000010]),
+    );
+
+    expect([...frozen]).toEqual([0b00000111]);
+    expect([...textures.ooosplatDeleted.data]).toEqual([255, 255, 255, 0, 0, 0, 0, 0]);
+    expect([...textures.ooosplatSelected.data]).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
     controller.destroy();
   });
 });

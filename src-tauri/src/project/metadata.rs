@@ -7,10 +7,18 @@ use uuid::Uuid;
 use crate::{
     pipeline::PipelineStage,
     presets::Quality,
-    video::{FramePlan, VideoInfo},
+    video::{FramePlan, ImageSequenceInfo, VideoInfo},
 };
 
 pub const PROJECT_APP_ID: &str = "studio.ooo.splat";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectInputType {
+    #[default]
+    Video,
+    Images,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,6 +182,8 @@ pub struct ProjectMetadata {
     #[serde(default)]
     pub status: ProjectStatus,
     pub source_path: PathBuf,
+    #[serde(default)]
+    pub input_type: ProjectInputType,
     pub quality: Quality,
     #[serde(default)]
     pub project_path: PathBuf,
@@ -192,7 +202,7 @@ pub struct ProjectMetadata {
 }
 
 pub const fn schema_version() -> u32 {
-    4
+    5
 }
 
 fn default_model() -> String {
@@ -234,6 +244,10 @@ pub struct PipelineStateFile {
     pub stage: PipelineStage,
     pub preset: Quality,
     pub video: Option<VideoInfo>,
+    #[serde(default)]
+    pub input_type: ProjectInputType,
+    #[serde(default)]
+    pub image_sequence: Option<ImageSequenceInfo>,
     pub frames: Option<FrameState>,
     pub features_complete: bool,
     pub matching_complete: bool,
@@ -243,10 +257,16 @@ pub struct PipelineStateFile {
 
 impl PipelineStateFile {
     pub fn created(preset: Quality) -> Self {
+        Self::created_for(preset, ProjectInputType::Video)
+    }
+
+    pub fn created_for(preset: Quality, input_type: ProjectInputType) -> Self {
         Self {
             stage: PipelineStage::Created,
             preset,
             video: None,
+            input_type,
+            image_sequence: None,
             frames: None,
             features_complete: false,
             matching_complete: false,
@@ -303,6 +323,7 @@ mod tests {
         assert_eq!(metadata.model, "final.ply");
         assert_eq!(metadata.transform, GaussianTransform::default());
         assert_eq!(metadata.editing, GaussianEditing::default());
+        assert_eq!(metadata.input_type, ProjectInputType::Video);
         assert_eq!(metadata.schema_version, 2);
     }
 

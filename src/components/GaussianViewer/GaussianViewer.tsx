@@ -133,6 +133,7 @@ type VideoExportPhase = "idle" | "preparing" | "rendering" | "finalizing" | "sav
 interface SplatSceneApi {
   replay: () => void;
   selectRectangle: (rectangle: SelectionRectangle, selectionMode: RectangleSelectionMode) => Promise<Uint8Array>;
+  freezeCrop: (crop: Exclude<GaussianCrop, null>, deletedMask: Uint8Array) => Promise<Uint8Array>;
   alignView: (view: GaussianOrthographicView) => void;
   initializeCrop: (kind: "sphere" | "box", previous: GaussianCrop) => Exclude<GaussianCrop, null> | null;
   exportVideo: (options: {
@@ -759,6 +760,13 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
     return selection.select(rectangle, selectionMode, editorStateRef.current.crop);
   }, []);
 
+  const freezeCrop = useCallback((currentCrop: Exclude<GaussianCrop, null>, currentDeletedMask: Uint8Array) => {
+    const selection = selectionRef.current;
+    if (!selection) return Promise.reject(new Error("Gaussian 选择器尚未就绪"));
+    if (contextLostRef.current) return Promise.reject(new Error("图形上下文已丢失，请重新加载预览。"));
+    return selection.freezeCrop(currentCrop, currentDeletedMask);
+  }, []);
+
   const cropBounds = useCallback(() => {
     const current = editorStateRef.current.crop;
     if (!current) return transformedModelBounds();
@@ -790,7 +798,7 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
       : { kind, center, size };
   }, [transformedModelBounds]);
 
-  useImperativeHandle(ref, () => ({ replay, exportVideo, selectRectangle, alignView, initializeCrop }), [alignView, exportVideo, initializeCrop, replay, selectRectangle]);
+  useImperativeHandle(ref, () => ({ replay, exportVideo, selectRectangle, freezeCrop, alignView, initializeCrop }), [alignView, exportVideo, freezeCrop, initializeCrop, replay, selectRectangle]);
 
   return <>
     <PreviewCamera ref={cameraRef} />
@@ -870,6 +878,8 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
   const [videoResult, setVideoResult] = useState<GaussianVideoExportResult | null>(null);
   const [pendingNavigation, setPendingNavigation] = useState<"preview" | "exit" | null>(null);
   const [navigationSaving, setNavigationSaving] = useState(false);
+  const [cropFreezing, setCropFreezing] = useState(false);
+  const [cropFreezeError, setCropFreezeError] = useState<string | null>(null);
   const previewAssetUrl = useMemo(() => {
     if (!store.descriptor) return "";
     return withPreviewAssetRevision(store.descriptor.assetUrl, "retry", rendererRevision.toString());
@@ -877,7 +887,7 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
 
   const onStatus = useCallback((status: ViewportStatus) => setViewport(status), []);
   const onAnimationStatus = useCallback((status: AnimationStatus) => setAnimationStatus(status), []);
-  const busy = gaussianExporting || !["idle", "completed", "error"].includes(videoPhase);
+  const busy = cropFreezing || gaussianExporting || !["idle", "completed", "error"].includes(videoPhase);
   const beginSave = useCallback(() => {
     pendingSavesRef.current += 1;
     useGaussianTransformStore.getState().setSaveState("saving");
@@ -991,7 +1001,7 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
 
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
-      if (mode !== "adjust" || !store.descriptor) return;
+      if (mode !== "adjust" || !store.descriptor || cropFreezing) return;
       const editingField = document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement;
       if (store.tool === "rectangle" && !editingField && event.key === "Escape") {
         event.preventDefault(); useGaussianTransformStore.getState().clearSelection(); return;
@@ -1006,12 +1016,18 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
       if (!isUndo && !isRedo) return;
       event.preventDefault();
       if (document.activeElement instanceof HTMLInputElement) document.activeElement.blur();
+      const previousTool = useGaussianTransformStore.getState().tool;
       if (isRedo) useGaussianTransformStore.getState().redo();
       else useGaussianTransformStore.getState().undo();
+      const next = useGaussianTransformStore.getState();
+      if (next.tool !== previousTool && (next.tool === "sphere" || next.tool === "box")) {
+        setOrthographicView("side");
+        requestAnimationFrame(() => sceneApiRef.current?.alignView("side"));
+      }
     };
     window.addEventListener("keydown", keyDown);
     return () => window.removeEventListener("keydown", keyDown);
-  }, [mode, store.descriptor?.projectId, store.tool]);
+  }, [cropFreezing, mode, store.descriptor?.projectId, store.tool]);
 
   useEffect(() => {
     let unlisten: undefined | (() => void);
@@ -1136,7 +1152,13 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
   };
   const runHistory = (direction: "undo" | "redo") => {
     if (document.activeElement instanceof HTMLInputElement) document.activeElement.blur();
+    const previousTool = useGaussianTransformStore.getState().tool;
     useGaussianTransformStore.getState()[direction]();
+    const next = useGaussianTransformStore.getState();
+    if (next.tool !== previousTool && (next.tool === "sphere" || next.tool === "box")) {
+      setOrthographicView("side");
+      requestAnimationFrame(() => sceneApiRef.current?.alignView("side"));
+    }
   };
   const hasUnsavedGaussianEdits = () => {
     const current = useGaussianTransformStore.getState();
@@ -1189,8 +1211,26 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
     requestAnimationFrame(() => sceneApiRef.current?.alignView(view));
   };
 
-  const switchTool = (tool: GaussianEditorTool) => {
+  const switchTool = async (tool: GaussianEditorTool) => {
     if (busy || tool === store.tool) return;
+    const current = useGaussianTransformStore.getState();
+    if (tool === "transform" && (current.tool === "sphere" || current.tool === "box") && current.editing.crop) {
+      current.commitCropTransaction();
+      const latest = useGaussianTransformStore.getState();
+      const crop = latest.editing.crop;
+      if (!crop || !sceneApiRef.current) return;
+      setCropFreezeError(null);
+      setCropFreezing(true);
+      try {
+        const deletedMask = await sceneApiRef.current.freezeCrop(crop, latest.deletedMask);
+        useGaussianTransformStore.getState().commitCropFreeze(crop, deletedMask);
+      } catch (error) {
+        setCropFreezeError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setCropFreezing(false);
+      }
+      return;
+    }
     if (tool === "sphere" || tool === "box") {
       setOrthographicView("side");
       enableCrop(tool, "side");
@@ -1306,7 +1346,7 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
     <div className="preview-commandbar">
       <div className="preview-commandbar-left">
         {mode === "adjust" && <div className="preview-editor-tools" role="toolbar" aria-label="Gaussian 编辑工具">
-          {toolItems.map(({ id, label, icon: Icon }) => <button key={id} type="button" className={store.tool === id ? "active" : ""} aria-pressed={store.tool === id} disabled={busy || viewport.phase !== "ready"} onClick={() => switchTool(id)}><Icon size={14} />{label}</button>)}
+          {toolItems.map(({ id, label, icon: Icon }) => <button key={id} type="button" className={store.tool === id ? "active" : ""} aria-pressed={store.tool === id} disabled={busy || viewport.phase !== "ready"} onClick={() => void switchTool(id)}><Icon size={14} />{label}</button>)}
         </div>}
       </div>
       <div className="preview-commandbar-center">
@@ -1342,6 +1382,8 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
         {mode === "preview" && <div className="portrait-matte" aria-hidden="true" />}
         {viewport.phase !== "ready" && viewport.phase !== "error" && <div className="viewport-overlay"><LoaderCircle className="spin" size={22} /><strong>{loadingLabel}</strong>{viewport.phase === "loading" && <span>{(viewport.progress * 100).toFixed(0)}%</span>}</div>}
         {viewport.phase === "error" && <div className="viewport-overlay error"><strong>预览不可用</strong><p>{viewport.error}</p><div className="viewport-error-actions"><button type="button" onClick={retry}>重新加载</button><button type="button" onClick={() => requestNavigation("exit")}>返回任务</button></div></div>}
+        {cropFreezing && <div className="viewport-overlay"><LoaderCircle className="spin" size={22} /><strong>正在固定裁切结果</strong><span>请稍候</span></div>}
+        {cropFreezeError && !cropFreezing && <div className="viewport-overlay error"><strong>无法固定裁切结果</strong><p>{cropFreezeError}</p><div className="viewport-error-actions"><button type="button" onClick={() => setCropFreezeError(null)}>返回编辑</button></div></div>}
         {selectionDrag && <div className={`rectangle-selection-box mode-${selectionDrag.selectionMode}`} style={selectionRectStyle} aria-hidden="true" />}
         {mode === "adjust" && store.tool === "transform" && <TransformPanel transform={store.transform} onBegin={store.beginTransaction} onChange={store.setTransformLive} onCommit={store.commitTransaction} />}
         {mode === "adjust" && (store.tool === "sphere" || store.tool === "box") && <SelectionPanel crop={store.editing.crop} kind={store.tool} onBegin={store.beginCropTransaction} onChange={store.setCropLive} onCommit={store.commitCropTransaction} onEnable={() => { const tool = useGaussianTransformStore.getState().tool; if (tool === "sphere" || tool === "box") enableCrop(tool); }} />}

@@ -29,6 +29,7 @@ export function countMaskBits(mask: Uint8Array) {
 type HistoryEntry =
   | { kind: "transform"; before: GaussianTransform; after: GaussianTransform; bytes: number }
   | { kind: "crop"; before: GaussianCrop; after: GaussianCrop; bytes: number }
+  | { kind: "cropFreeze"; crop: Exclude<GaussianCrop, null>; delta: Uint8Array; bytes: number }
   | { kind: "deletion"; delta: Uint8Array; bytes: number };
 
 function trimHistory(entries: HistoryEntry[]) {
@@ -69,6 +70,7 @@ interface GaussianTransformState {
   beginCropTransaction: () => void;
   setCropLive: (crop: GaussianCrop) => void;
   commitCropTransaction: () => void;
+  commitCropFreeze: (crop: Exclude<GaussianCrop, null>, deletedMask: Uint8Array) => void;
   setInitialDeletedMask: (mask: Uint8Array) => void;
   setSelectionMask: (mask: Uint8Array) => void;
   clearSelection: () => void;
@@ -84,6 +86,16 @@ const EMPTY_EDITING: GaussianEditState = { crop: null, revision: 0, sourceSplatC
 function applyEntry(state: GaussianTransformState, entry: HistoryEntry, direction: "undo" | "redo") {
   if (entry.kind === "transform") return { transform: cloneTransform(direction === "undo" ? entry.before : entry.after) };
   if (entry.kind === "crop") return { editing: { ...state.editing, crop: cloneCrop(direction === "undo" ? entry.before : entry.after) }, editChangeSerial: state.editChangeSerial + 1 };
+  if (entry.kind === "cropFreeze") {
+    const deletedMask = xorMask(state.deletedMask, entry.delta);
+    return {
+      deletedMask,
+      editing: { ...state.editing, crop: direction === "undo" ? cloneCrop(entry.crop) : null, deletedCount: countMaskBits(deletedMask) },
+      selectionMask: new Uint8Array(state.selectionMask.length), selectedCount: 0,
+      tool: (direction === "undo" ? entry.crop.kind : "transform") as GaussianEditorTool,
+      editChangeSerial: state.editChangeSerial + 1,
+    };
+  }
   const deletedMask = xorMask(state.deletedMask, entry.delta);
   return {
     deletedMask,
@@ -132,6 +144,23 @@ export const useGaussianTransformStore = create<GaussianTransformState>((set, ge
     const state = get(); const start = state.cropTransactionStart;
     if (start === undefined || equalCrop(start, state.editing.crop)) { set({ cropTransactionStart: undefined }); return; }
     set({ history: pushHistory(state.history, { kind: "crop", before: cloneCrop(start), after: cloneCrop(state.editing.crop), bytes: 160 }), future: [], cropTransactionStart: undefined, revision: state.revision + 1, editChangeSerial: state.editChangeSerial + 1, saveState: "dirty" });
+  },
+  commitCropFreeze: (crop, deletedMask) => {
+    const state = get();
+    if (!equalCrop(state.editing.crop, crop)) throw new Error("裁切区域已发生变化，请重试");
+    if (deletedMask.length !== state.deletedMask.length) throw new Error("冻结裁切位图长度不一致");
+    const next = deletedMask.slice();
+    const delta = new Uint8Array(next.length);
+    for (let index = 0; index < next.length; index += 1) delta[index] = state.deletedMask[index] ^ next[index];
+    set({
+      editing: { ...state.editing, crop: null, deletedCount: countMaskBits(next) },
+      deletedMask: next,
+      selectionMask: new Uint8Array(state.selectionMask.length), selectedCount: 0,
+      tool: "transform",
+      history: pushHistory(state.history, { kind: "cropFreeze", crop: cloneCrop(crop)!, delta, bytes: delta.byteLength + 192 }),
+      future: [], transactionStart: null, cropTransactionStart: undefined,
+      revision: state.revision + 1, editChangeSerial: state.editChangeSerial + 1, saveState: "dirty",
+    });
   },
   setInitialDeletedMask: (mask) => {
     const state = get();

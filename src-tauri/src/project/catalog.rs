@@ -474,6 +474,7 @@ mod tests {
             duration_ms: None,
             status: ProjectStatus::Failed,
             source_path: PathBuf::new(),
+            input_type: crate::project::ProjectInputType::Video,
             quality: crate::presets::Quality::Balanced,
             project_path: PathBuf::from("C:/arbitrary-folder"),
             output_path: None,

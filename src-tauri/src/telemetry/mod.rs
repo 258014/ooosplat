@@ -25,15 +25,21 @@ struct StageTiming {
 pub struct PipelineTelemetrySession {
     service: TelemetryService,
     quality: TelemetryQuality,
+    input_type: TelemetryInputType,
     started: Instant,
     timing: Mutex<StageTiming>,
 }
 
 impl PipelineTelemetrySession {
-    pub fn new(service: TelemetryService, quality: Quality) -> Self {
+    pub fn new(
+        service: TelemetryService,
+        quality: Quality,
+        input_type: TelemetryInputType,
+    ) -> Self {
         Self {
             service,
             quality: quality.into(),
+            input_type,
             started: Instant::now(),
             timing: Mutex::new(StageTiming { active: None }),
         }
@@ -42,7 +48,7 @@ impl PipelineTelemetrySession {
     pub fn generation_started(&self) {
         self.service.track(TelemetryEvent::GenerationStarted {
             quality_preset: self.quality,
-            input_type: TelemetryInputType::Video,
+            input_type: self.input_type,
         });
     }
 
@@ -90,13 +96,13 @@ impl PipelineTelemetrySession {
         &self,
         total_duration_ms: u64,
         frame_count: u64,
-        source_duration_seconds: f64,
+        source_duration_seconds: Option<f64>,
     ) {
         self.service.track(TelemetryEvent::GenerationCompleted {
             quality_preset: self.quality,
             total_duration_ms,
             frame_count_bucket: FrameCountBucket::from_count(frame_count),
-            duration_bucket: DurationBucket::from_seconds(source_duration_seconds),
+            duration_bucket: source_duration_seconds.map(DurationBucket::from_seconds),
         });
     }
 
@@ -231,7 +237,8 @@ mod tests {
         let (service, events) =
             TelemetryService::recording(directory.path().join("telemetry.json"));
         service.enable_for_test().await;
-        let session = PipelineTelemetrySession::new(service, Quality::Balanced);
+        let session =
+            PipelineTelemetrySession::new(service, Quality::Balanced, TelemetryInputType::Video);
         session.observe(&stage_event(PipelineStage::ExtractingFrames, 0.0));
         session.observe(&stage_event(PipelineStage::ExtractingFrames, 100.0));
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

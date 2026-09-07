@@ -16,6 +16,11 @@ const mocks = vi.hoisted(() => ({
   getProjectOverview: vi.fn(),
   initializeTelemetry: vi.fn(),
   setTelemetryConsent: vi.fn(),
+  selectVideo: vi.fn(),
+  selectImageSequence: vi.fn(),
+  probeAndPlan: vi.fn(),
+  confirmLargeImageSequence: vi.fn(),
+  startPipeline: vi.fn(),
   notifyPreviewDisposed: vi.fn(),
 }));
 
@@ -23,20 +28,22 @@ vi.mock("../lib/backend", () => ({
   cancelPipeline: mocks.cancelPipeline,
   checkEngines: vi.fn().mockResolvedValue([]),
   confirmAndDeleteProject: vi.fn().mockResolvedValue(false),
+  confirmLargeImageSequence: mocks.confirmLargeImageSequence,
   estimateProjectRuntime: mocks.estimateProjectRuntime,
   getProjectOverview: mocks.getProjectOverview,
   initializeTelemetry: mocks.initializeTelemetry,
   onPipelineEvent: vi.fn().mockResolvedValue(() => undefined),
   prepareGaussianPreview: mocks.prepareGaussianPreview,
-  probeAndPlan: vi.fn(),
+  probeAndPlan: mocks.probeAndPlan,
   releaseGaussianPreview: mocks.releaseGaussianPreview,
   resumePipeline: mocks.resumePipeline,
   revealProject: vi.fn(),
   selectProjectsRoot: vi.fn(),
-  selectVideo: vi.fn(),
+  selectImageSequence: mocks.selectImageSequence,
+  selectVideo: mocks.selectVideo,
   setProjectsRoot: vi.fn(),
   setTelemetryConsent: mocks.setTelemetryConsent,
-  startPipeline: vi.fn(),
+  startPipeline: mocks.startPipeline,
 }));
 
 vi.mock("../components/GaussianViewer", () => ({
@@ -85,8 +92,8 @@ describe("App preview workspace", () => {
     }
     useGaussianTransformStore.getState().close();
     useAppStore.setState({
-      videoPath: null, projectsRoot: "E:\\Projects", projects: [], quality: "balanced", colmapAcceleration: null,
-      video: null, plan: null, estimate: null, engines: [], phase: "idle", progress: 0, progressMessage: "",
+      inputPath: null, inputType: "video", projectsRoot: "E:\\Projects", projects: [], quality: "balanced", colmapAcceleration: null,
+      video: null, imageSequence: null, plan: null, estimate: null, engines: [], phase: "idle", progress: 0, progressMessage: "",
       latestEvent: null, events: [], result: null, error: null,
     });
     mocks.prepareGaussianPreview.mockReset();
@@ -110,6 +117,11 @@ describe("App preview workspace", () => {
     mocks.getProjectOverview.mockReset().mockResolvedValue({ projectsRoot: "E:\\Projects", projects: [project] });
     mocks.initializeTelemetry.mockReset().mockResolvedValue({ analyticsEnabled: true, consentDecided: true, deliveryStatus: "configured" });
     mocks.setTelemetryConsent.mockReset().mockResolvedValue({ analyticsEnabled: true, consentDecided: true, deliveryStatus: "configured" });
+    mocks.selectVideo.mockReset().mockResolvedValue(null);
+    mocks.selectImageSequence.mockReset().mockResolvedValue(null);
+    mocks.probeAndPlan.mockReset();
+    mocks.confirmLargeImageSequence.mockReset().mockResolvedValue(true);
+    mocks.startPipeline.mockReset();
     mocks.notifyPreviewDisposed.mockReset().mockImplementation((callback: (projectId: string) => void, projectId: string) => {
       queueMicrotask(() => callback(projectId));
     });
@@ -395,5 +407,78 @@ describe("App preview workspace", () => {
 
     expect(mocks.prepareGaussianPreview).toHaveBeenCalledTimes(3);
     expect(mocks.releaseGaussianPreview).toHaveBeenCalledTimes(3);
+  });
+
+  it("selects the input type on the left before opening the matching picker", async () => {
+    mocks.selectImageSequence.mockResolvedValueOnce("E:\\Photos\\object");
+    mocks.probeAndPlan.mockResolvedValueOnce({
+      inputType: "images",
+      video: null,
+      imageSequence: {
+        imageCount: 24,
+        width: 1920,
+        height: 1080,
+        hasAlpha: true,
+        requiresLargeSequenceConfirmation: false,
+      },
+      plan: { retentionRatio: 1, samplingFps: 0, estimatedFrames: 24 },
+      estimate: {
+        estimatedMs: 120_000,
+        lowerBoundMs: 80_000,
+        upperBoundMs: 180_000,
+        confidence: "low",
+        sampleCount: 0,
+        basis: "图片序列",
+      },
+    });
+
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-label="选择输入素材类型"]');
+    const picker = container.querySelector<HTMLButtonElement>(".input-picker > .path-picker");
+    expect(toggle?.textContent).toContain("视频");
+    await act(async () => picker?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(mocks.selectVideo).toHaveBeenCalledOnce();
+
+    await act(async () => toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    const imageOption = [...container.querySelectorAll(".input-picker-menu button")].find((button) =>
+      button.textContent?.includes("图片"),
+    );
+    await act(async () => imageOption?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(mocks.selectImageSequence).not.toHaveBeenCalled();
+    expect(toggle?.textContent).toContain("图片");
+
+    await act(async () => picker?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flush();
+
+    expect(mocks.selectImageSequence).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain("24 张");
+    expect(container.textContent).toContain("将保留 PNG Alpha");
+    expect(container.querySelectorAll(".input-picker")).toHaveLength(1);
+  });
+
+  it("requires confirmation before exhaustive matching more than 500 images", async () => {
+    await act(async () => {
+      useAppStore.setState({
+        inputPath: "E:\\Photos\\large",
+        inputType: "images",
+        imageSequence: {
+          imageCount: 501,
+          width: 1920,
+          height: 1080,
+          hasAlpha: false,
+          requiresLargeSequenceConfirmation: true,
+        },
+        plan: { retentionRatio: 1, samplingFps: 0, estimatedFrames: 501 },
+        estimate: { estimatedMs: 1, lowerBoundMs: 1, upperBoundMs: 2, confidence: "low", sampleCount: 0, basis: "test" },
+      });
+    });
+    mocks.confirmLargeImageSequence.mockResolvedValueOnce(false);
+    await flush();
+
+    const generate = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("开始生成"));
+    await act(async () => generate?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flush();
+
+    expect(mocks.confirmLargeImageSequence).toHaveBeenCalledWith(501);
+    expect(mocks.startPipeline).not.toHaveBeenCalled();
   });
 });

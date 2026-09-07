@@ -82,17 +82,18 @@ async fn feature_gpu_options(
 
 async fn matching_gpu_options(
     executable: &Path,
+    matcher: &str,
     manager: &ProcessManager,
 ) -> Result<(&'static str, &'static str)> {
-    let help = command_help(executable, "sequential_matcher", manager).await?;
+    let help = command_help(executable, matcher, manager).await?;
     if help.contains("--FeatureMatching.use_gpu") {
         Ok(("--FeatureMatching.use_gpu", "--FeatureMatching.gpu_index"))
     } else if help.contains("--SiftMatching.use_gpu") {
         Ok(("--SiftMatching.use_gpu", "--SiftMatching.gpu_index"))
     } else {
-        Err(SplatError::UnsupportedEngine(
-            "COLMAP sequential_matcher 不支持已知的 SIFT GPU 参数".into(),
-        ))
+        Err(SplatError::UnsupportedEngine(format!(
+            "COLMAP {matcher} 不支持已知的 SIFT GPU 参数"
+        )))
     }
 }
 
@@ -169,10 +170,38 @@ pub async fn match_sequential(
     observer: Option<ProcessObserver>,
     gpu_index: Option<u32>,
 ) -> Result<()> {
-    let (use_gpu_option, gpu_index_option) = matching_gpu_options(executable, manager).await?;
+    let (use_gpu_option, gpu_index_option) =
+        matching_gpu_options(executable, "sequential_matcher", manager).await?;
     run_colmap(
         executable,
         sequential_matching_args(database, gpu_index, use_gpu_option, gpu_index_option),
+        database.parent().unwrap_or(Path::new(".")),
+        log,
+        manager,
+        observer,
+    )
+    .await
+}
+
+pub async fn match_exhaustive(
+    executable: &Path,
+    database: &Path,
+    log: PathBuf,
+    manager: &ProcessManager,
+    observer: Option<ProcessObserver>,
+    gpu_index: Option<u32>,
+) -> Result<()> {
+    let (use_gpu_option, gpu_index_option) =
+        matching_gpu_options(executable, "exhaustive_matcher", manager).await?;
+    run_colmap(
+        executable,
+        matching_args(
+            "exhaustive_matcher",
+            database,
+            gpu_index,
+            use_gpu_option,
+            gpu_index_option,
+        ),
         database.parent().unwrap_or(Path::new(".")),
         log,
         manager,
@@ -219,8 +248,29 @@ fn sequential_matching_args(
     use_gpu_option: &str,
     gpu_index_option: &str,
 ) -> Vec<OsString> {
+    let mut args = matching_args(
+        "sequential_matcher",
+        database,
+        gpu_index,
+        use_gpu_option,
+        gpu_index_option,
+    );
+    args.extend([
+        OsString::from("--SequentialMatching.overlap"),
+        OsString::from("10"),
+    ]);
+    args
+}
+
+fn matching_args(
+    matcher: &str,
+    database: &Path,
+    gpu_index: Option<u32>,
+    use_gpu_option: &str,
+    gpu_index_option: &str,
+) -> Vec<OsString> {
     let mut args = vec![
-        "sequential_matcher".into(),
+        matcher.into(),
         "--database_path".into(),
         database.into(),
         use_gpu_option.into(),
@@ -230,10 +280,6 @@ fn sequential_matching_args(
         args.push(gpu_index_option.into());
         args.push(index.to_string().into());
     }
-    args.extend([
-        OsString::from("--SequentialMatching.overlap"),
-        OsString::from("10"),
-    ]);
     args
 }
 
@@ -336,6 +382,27 @@ mod tests {
         assert!(!matching
             .iter()
             .any(|arg| arg == "--FeatureMatching.gpu_index"));
+    }
+
+    #[test]
+    fn exhaustive_matching_uses_the_selected_gpu_without_video_options() {
+        let matching = strings(matching_args(
+            "exhaustive_matcher",
+            Path::new("database.db"),
+            Some(1),
+            "--FeatureMatching.use_gpu",
+            "--FeatureMatching.gpu_index",
+        ));
+        assert_eq!(matching[0], "exhaustive_matcher");
+        assert!(matching
+            .windows(2)
+            .any(|pair| pair == ["--FeatureMatching.use_gpu", "1"]));
+        assert!(matching
+            .windows(2)
+            .any(|pair| pair == ["--FeatureMatching.gpu_index", "1"]));
+        assert!(!matching
+            .iter()
+            .any(|arg| arg == "--SequentialMatching.overlap"));
     }
 
     #[test]

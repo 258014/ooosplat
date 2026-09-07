@@ -201,6 +201,12 @@ $mediabunnyLicense = Read-Utf8Text "licenses/Mediabunny-MPL-2.0.txt"
 Assert-Contains $mediabunnyLicense "Mozilla Public License Version 2.0" "Mediabunny license"
 Assert-Contains $mediabunnyLicense "2. License Grants and Conditions" "Mediabunny license"
 
+foreach ($term in "image crate", "0.25.10", "MIT OR Apache-2.0", "https://github.com/image-rs/image/tree/v0.25.10") {
+    Assert-Contains $thirdParty $term "THIRD_PARTY_NOTICES.txt"
+}
+$cargoToml = Read-Utf8Text "src-tauri/Cargo.toml"
+Assert-Contains $cargoToml 'image = { version = "0.25"' "Cargo.toml"
+
 $ffmpegLicense = Read-Utf8Text "licenses/FFmpeg-LGPL-2.1.txt"
 Assert-Contains $ffmpegLicense "GNU LESSER GENERAL PUBLIC LICENSE" "FFmpeg license"
 Assert-Contains $ffmpegLicense "Version 2.1, February 1999" "FFmpeg license"

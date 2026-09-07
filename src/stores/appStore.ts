@@ -1,13 +1,15 @@
 import { create } from "zustand";
-import type { ColmapAccelerationStatus, EngineStatus, FramePlan, PipelineEvent, PipelineResult, ProjectSummary, Quality, RunPhase, RuntimeEstimate, VideoInfo } from "../types/pipeline";
+import type { ColmapAccelerationStatus, EngineStatus, FramePlan, ImageSequenceInfo, InputType, PipelineEvent, PipelineResult, ProjectSummary, Quality, RunPhase, RuntimeEstimate, VideoInfo } from "../types/pipeline";
 
 interface AppState {
-  videoPath: string | null;
+  inputPath: string | null;
+  inputType: InputType;
   projectsRoot: string;
   projects: ProjectSummary[];
   quality: Quality;
   colmapAcceleration: ColmapAccelerationStatus | null;
   video: VideoInfo | null;
+  imageSequence: ImageSequenceInfo | null;
   plan: FramePlan | null;
   estimate: RuntimeEstimate | null;
   engines: EngineStatus[];
@@ -18,12 +20,12 @@ interface AppState {
   events: PipelineEvent[];
   result: PipelineResult | null;
   error: string | null;
-  setVideoPath: (path: string | null) => void;
+  setInputPath: (path: string | null, inputType: InputType) => void;
   setProjectsRoot: (path: string) => void;
   setProjects: (projects: ProjectSummary[]) => void;
   setQuality: (quality: Quality) => void;
   setColmapAcceleration: (acceleration: ColmapAccelerationStatus | null) => void;
-  setAnalysis: (video: VideoInfo, plan: FramePlan, estimate: RuntimeEstimate) => void;
+  setAnalysis: (inputType: InputType, video: VideoInfo | null, imageSequence: ImageSequenceInfo | null, plan: FramePlan, estimate: RuntimeEstimate) => void;
   setEstimate: (estimate: RuntimeEstimate | null) => void;
   setEngines: (engines: EngineStatus[]) => void;
   setPhase: (phase: RunPhase) => void;
@@ -34,12 +36,14 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  videoPath: null,
+  inputPath: null,
+  inputType: "video",
   projectsRoot: "",
   projects: [],
   quality: "balanced",
   colmapAcceleration: null,
   video: null,
+  imageSequence: null,
   plan: null,
   estimate: null,
   engines: [],
@@ -50,12 +54,12 @@ export const useAppStore = create<AppState>((set) => ({
   events: [],
   result: null,
   error: null,
-  setVideoPath: (videoPath) => set({ videoPath, video: null, plan: null, estimate: null, result: null, error: null, progress: 0, phase: "idle" }),
+  setInputPath: (inputPath, inputType) => set({ inputPath, inputType, video: null, imageSequence: null, plan: null, estimate: null, result: null, error: null, progress: 0, phase: "idle" }),
   setProjectsRoot: (projectsRoot) => set({ projectsRoot }),
   setProjects: (projects) => set({ projects }),
   setQuality: (quality) => set({ quality, plan: null, estimate: null, result: null, error: null }),
   setColmapAcceleration: (colmapAcceleration) => set({ colmapAcceleration }),
-  setAnalysis: (video, plan, estimate) => set({ video, plan, estimate }),
+  setAnalysis: (inputType, video, imageSequence, plan, estimate) => set({ inputType, video, imageSequence, plan, estimate }),
   setEstimate: (estimate) => set({ estimate }),
   setEngines: (engines) => set({ engines }),
   setPhase: (phase) => set({ phase }),

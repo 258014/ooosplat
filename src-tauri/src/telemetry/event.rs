@@ -176,7 +176,7 @@ pub enum TelemetryEvent {
         quality_preset: TelemetryQuality,
         total_duration_ms: u64,
         frame_count_bucket: FrameCountBucket,
-        duration_bucket: DurationBucket,
+        duration_bucket: Option<DurationBucket>,
     },
     GenerationFailed {
         stage: Option<TelemetryStage>,
@@ -246,7 +246,7 @@ impl TelemetryEvent {
                     quality_preset: Some(quality_preset),
                     duration_ms: Some(total_duration_ms.min(86_400_000)),
                     frame_count_bucket: Some(frame_count_bucket),
-                    input_duration_bucket: Some(duration_bucket),
+                    input_duration_bucket: duration_bucket,
                     ..TelemetryProperties::default()
                 },
             ),
@@ -387,6 +387,31 @@ mod tests {
     }
 
     #[test]
+    fn image_events_use_images_and_omit_a_fake_video_duration() {
+        let started = serde_json::to_value(TelemetryPayload::new(
+            Uuid::nil(),
+            TelemetryEvent::GenerationStarted {
+                quality_preset: TelemetryQuality::Balanced,
+                input_type: TelemetryInputType::Images,
+            },
+        ))
+        .unwrap();
+        assert_eq!(started["properties"]["inputType"], "images");
+
+        let completed = serde_json::to_value(TelemetryPayload::new(
+            Uuid::nil(),
+            TelemetryEvent::GenerationCompleted {
+                quality_preset: TelemetryQuality::Balanced,
+                total_duration_ms: 30_000,
+                frame_count_bucket: FrameCountBucket::UpTo100,
+                duration_bucket: None,
+            },
+        ))
+        .unwrap();
+        assert!(completed["properties"].get("inputDurationBucket").is_none());
+    }
+
+    #[test]
     fn privacy_guard_rejects_sensitive_keys_recursively() {
         assert!(!validate_privacy(
             &serde_json::json!({"details": {"file_name": "secret"}})
@@ -444,7 +469,7 @@ mod tests {
                 quality_preset: TelemetryQuality::High,
                 total_duration_ms: 123_000,
                 frame_count_bucket: FrameCountBucket::From301To500,
-                duration_bucket: DurationBucket::UpTo60Seconds,
+                duration_bucket: Some(DurationBucket::UpTo60Seconds),
             },
         ))
         .unwrap();

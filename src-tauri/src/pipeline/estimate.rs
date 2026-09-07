@@ -37,6 +37,34 @@ pub fn estimate_runtime(
     quality: Quality,
     samples: &[RuntimeSample],
 ) -> RuntimeEstimate {
+    estimate_runtime_for_input(video.total_frames, plan, quality, samples, "视频总帧")
+}
+
+pub fn estimate_runtime_for_images(
+    image_count: u64,
+    plan: &FramePlan,
+    quality: Quality,
+    samples: &[RuntimeSample],
+) -> RuntimeEstimate {
+    let mut estimate = estimate_runtime_for_input(image_count, plan, quality, samples, "输入图片");
+    estimate.basis = if estimate.sample_count == 0 {
+        format!("根据 {image_count} 张输入图片和质量档位估算；完成任务后会自动校准")
+    } else {
+        format!(
+            "根据 {image_count} 张输入图片、质量档位和本机 {} 个历史任务校准",
+            estimate.sample_count
+        )
+    };
+    estimate
+}
+
+fn estimate_runtime_for_input(
+    source_count: u64,
+    plan: &FramePlan,
+    quality: Quality,
+    samples: &[RuntimeSample],
+    _source_label: &str,
+) -> RuntimeEstimate {
     let base = base_estimate_ms(plan.estimated_frames, quality);
     let valid_samples = samples
         .iter()
@@ -89,12 +117,12 @@ pub fn estimate_runtime(
         basis: if sample_count == 0 {
             format!(
                 "根据输入 {} 总帧、预计处理 {} 帧和质量档位估算；完成任务后会自动校准",
-                video.total_frames, plan.estimated_frames
+                source_count, plan.estimated_frames
             )
         } else {
             format!(
                 "根据输入 {} 总帧、预计处理 {} 帧、质量档位和本机 {sample_count} 个{calibration_label}任务校准",
-                video.total_frames, plan.estimated_frames,
+                source_count, plan.estimated_frames,
             )
         },
     }
@@ -131,6 +159,21 @@ pub(crate) fn estimate_calibrated_brush_stage_ms(
 ) -> u64 {
     let base_total_ms = base_estimate_ms(plan.estimated_frames, quality).max(1);
     let calibrated_total_ms = estimate_runtime(video, plan, quality, samples).estimated_ms;
+    let calibration = calibrated_total_ms as f64 / base_total_ms as f64;
+    (estimate_brush_stage_ms(quality) as f64 * calibration)
+        .round()
+        .max(1_000.0) as u64
+}
+
+pub(crate) fn estimate_calibrated_brush_stage_ms_for_images(
+    image_count: u64,
+    plan: &FramePlan,
+    quality: Quality,
+    samples: &[RuntimeSample],
+) -> u64 {
+    let base_total_ms = base_estimate_ms(plan.estimated_frames, quality).max(1);
+    let calibrated_total_ms =
+        estimate_runtime_for_images(image_count, plan, quality, samples).estimated_ms;
     let calibration = calibrated_total_ms as f64 / base_total_ms as f64;
     (estimate_brush_stage_ms(quality) as f64 * calibration)
         .round()

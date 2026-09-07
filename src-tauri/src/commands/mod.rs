@@ -17,14 +17,15 @@ use crate::{
     },
     error::{Result, SplatError},
     pipeline::{
-        estimate::{estimate_runtime, RuntimeEstimate},
+        estimate::{estimate_runtime, estimate_runtime_for_images, RuntimeEstimate},
         runner::{PipelineResult, PipelineRunner},
     },
     presets::Quality,
     project::{
         catalog::{self, AppSettings, ProjectOverview},
         manager::atomic_write_json,
-        GaussianCrop, GaussianEditing, GaussianTransform, PipelineStateFile, ProjectStatus,
+        GaussianCrop, GaussianEditing, GaussianTransform, PipelineStateFile, ProjectInputType,
+        ProjectStatus,
     },
     reconstruction::{
         edit_mask::{
@@ -34,8 +35,13 @@ use crate::{
         ply::inspect_gaussian_ply,
         splat_transform::{export_transformed_ply_with_edits, GaussianExportEdits},
     },
-    telemetry::{PipelineTelemetrySession, TelemetryPreferences, TelemetryService},
-    video::{FramePlan, FrameSelectionStrategy, UniformRatioFrameSelection, VideoInfo},
+    telemetry::{
+        PipelineTelemetrySession, TelemetryInputType, TelemetryPreferences, TelemetryService,
+    },
+    video::{
+        analyze_image_sequence, create_image_plan, FramePlan, FrameSelectionStrategy,
+        ImageSequenceInfo, UniformRatioFrameSelection, VideoInfo,
+    },
 };
 
 #[derive(Default)]
@@ -142,7 +148,9 @@ pub struct GaussianVideoExportResult {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeAndPlan {
-    video: VideoInfo,
+    input_type: ProjectInputType,
+    video: Option<VideoInfo>,
+    image_sequence: Option<ImageSequenceInfo>,
     plan: FramePlan,
     estimate: RuntimeEstimate,
 }
@@ -168,15 +176,37 @@ pub async fn probe_and_plan(
     quality: Quality,
 ) -> std::result::Result<ProbeAndPlan, SplatError> {
     let engine_paths = paths_for_app(&app);
-    let video = probe_video(&engine_paths.ffprobe, &PathBuf::from(path), None).await?;
-    let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
     let samples = catalog::runtime_samples().await;
-    let estimate = estimate_runtime(&video, &plan, quality, &samples);
-    Ok(ProbeAndPlan {
-        video,
-        plan,
-        estimate,
-    })
+    let input = PathBuf::from(path);
+    if input.is_dir() {
+        let image_sequence = tokio::task::spawn_blocking({
+            let input = input.clone();
+            move || analyze_image_sequence(&input)
+        })
+        .await
+        .map_err(|error| SplatError::Process(format!("图片序列分析任务失败：{error}")))??;
+        let plan = create_image_plan(&image_sequence, &quality.preset());
+        let estimate =
+            estimate_runtime_for_images(image_sequence.image_count, &plan, quality, &samples);
+        Ok(ProbeAndPlan {
+            input_type: ProjectInputType::Images,
+            video: None,
+            image_sequence: Some(image_sequence),
+            plan,
+            estimate,
+        })
+    } else {
+        let video = probe_video(&engine_paths.ffprobe, &input, None).await?;
+        let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
+        let estimate = estimate_runtime(&video, &plan, quality, &samples);
+        Ok(ProbeAndPlan {
+            input_type: ProjectInputType::Video,
+            video: Some(video),
+            image_sequence: None,
+            plan,
+            estimate,
+        })
+    }
 }
 
 fn resume_checkpoint_fraction(state: &PipelineStateFile) -> (f64, &'static str) {
@@ -208,23 +238,48 @@ pub async fn estimate_project_runtime(
     let (project, metadata) = catalog::load_registered_project(project_id).await?;
     let state_bytes = tokio::fs::read(project.join("state.json")).await?;
     let state: PipelineStateFile = serde_json::from_slice(&state_bytes)?;
-    let video = match state.video.clone() {
-        Some(video) => video,
-        None => probe_video(&paths_for_app(&app).ffprobe, &metadata.source_path, None).await?,
-    };
-    let plan = match state.frames.as_ref() {
-        Some(frames) => FramePlan {
-            retention_ratio: frames.retention_ratio,
-            sampling_fps: frames.sampling_fps,
-            estimated_frames: frames
-                .extracted_frames
-                .unwrap_or(frames.estimated_frames)
-                .max(1),
-        },
-        None => UniformRatioFrameSelection.create_plan(&video, &metadata.quality.preset()),
-    };
+    let saved_plan = state.frames.as_ref().map(|frames| FramePlan {
+        retention_ratio: frames.retention_ratio,
+        sampling_fps: frames.sampling_fps,
+        estimated_frames: frames
+            .extracted_frames
+            .unwrap_or(frames.estimated_frames)
+            .max(1),
+    });
     let samples = catalog::runtime_samples().await;
-    let mut estimate = estimate_runtime(&video, &plan, metadata.quality, &samples);
+    let mut estimate = match metadata.input_type {
+        ProjectInputType::Video => {
+            let video = match state.video.clone() {
+                Some(video) => video,
+                None => {
+                    probe_video(&paths_for_app(&app).ffprobe, &metadata.source_path, None).await?
+                }
+            };
+            let plan = saved_plan.unwrap_or_else(|| {
+                UniformRatioFrameSelection.create_plan(&video, &metadata.quality.preset())
+            });
+            estimate_runtime(&video, &plan, metadata.quality, &samples)
+        }
+        ProjectInputType::Images => {
+            let image_sequence = match state.image_sequence.clone() {
+                Some(info) => info,
+                None => tokio::task::spawn_blocking({
+                    let source = metadata.source_path.clone();
+                    move || analyze_image_sequence(&source)
+                })
+                .await
+                .map_err(|error| SplatError::Process(format!("图片序列分析任务失败：{error}")))??,
+            };
+            let plan = saved_plan
+                .unwrap_or_else(|| create_image_plan(&image_sequence, &metadata.quality.preset()));
+            estimate_runtime_for_images(
+                image_sequence.image_count,
+                &plan,
+                metadata.quality,
+                &samples,
+            )
+        }
+    };
     let previous_duration = metadata.duration_ms.unwrap_or(0);
     let (completed_fraction, next_stage) = resume_checkpoint_fraction(&state);
     let remaining_fraction = 1.0 - completed_fraction;
@@ -290,6 +345,11 @@ pub async fn start_pipeline(
     let telemetry_session = Arc::new(PipelineTelemetrySession::new(
         telemetry.inner().clone(),
         quality,
+        if Path::new(&path).is_dir() {
+            TelemetryInputType::Images
+        } else {
+            TelemetryInputType::Video
+        },
     ));
     let event_telemetry = telemetry_session.clone();
     let runner = Arc::new(PipelineRunner::new(paths_for_app(&app), move |event| {
@@ -343,6 +403,10 @@ pub async fn resume_pipeline(
     let telemetry_session = Arc::new(PipelineTelemetrySession::new(
         telemetry.inner().clone(),
         metadata.quality,
+        match metadata.input_type {
+            ProjectInputType::Video => TelemetryInputType::Video,
+            ProjectInputType::Images => TelemetryInputType::Images,
+        },
     ));
     let event_telemetry = telemetry_session.clone();
     let runner = Arc::new(PipelineRunner::new(paths_for_app(&app), move |event| {

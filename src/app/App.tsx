@@ -1,21 +1,22 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
-  Blend, ChevronRight, CircleAlert, Clapperboard, Cpu, FileBox,
+  Blend, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Cpu, FileBox, Images,
   Eye, FolderOpen, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Square, Trash2,
   Settings2, Zap,
 } from "lucide-react";
 import appLogo from "../../assets/app-icon.svg";
 import { TelemetryPreferences } from "../components/TelemetryPreferences";
 import {
-  cancelPipeline, checkEngines, confirmAndDeleteProject, estimateProjectRuntime, getProjectOverview,
-  onPipelineEvent, probeAndPlan, revealProject, selectProjectsRoot, selectVideo,
+  cancelPipeline, checkEngines, confirmAndDeleteProject, confirmLargeImageSequence,
+  estimateProjectRuntime, getProjectOverview, onPipelineEvent, probeAndPlan, revealProject,
+  selectImageSequence, selectProjectsRoot, selectVideo,
   setProjectsRoot, startPipeline, prepareGaussianPreview, releaseGaussianPreview,
   initializeTelemetry, setTelemetryConsent, resumePipeline,
 } from "../lib/backend";
 import { startElapsedTicker } from "../lib/elapsedTimer";
 import { useAppStore } from "../stores/appStore";
 import { useGaussianTransformStore } from "../stores/gaussianTransformStore";
-import type { EngineStatus, ProjectStatus, ProjectSummary, Quality } from "../types/pipeline";
+import type { EngineStatus, InputType, ProjectStatus, ProjectSummary, Quality } from "../types/pipeline";
 import type { TelemetryPreferences as TelemetryPreferencesState } from "../types/telemetry";
 
 const GaussianViewer = lazy(() => import("../components/GaussianViewer").then((module) => ({ default: module.GaussianViewer })));
@@ -28,8 +29,8 @@ const qualities: Array<{ value: Quality; label: string; description: string }> =
 ];
 
 const stages = [
-  ["probingVideo", "视频分析"], ["extractingFrames", "画面提取"],
-  ["extractingFeatures", "特征提取"], ["matching", "顺序匹配"],
+  ["probingVideo", "素材分析"], ["extractingFrames", "画面准备"],
+  ["extractingFeatures", "特征提取"], ["matching", "图像匹配"],
   ["reconstructing", "相机重建"], ["trainingSplats", "Splat 训练"],
   ["exporting", "结果发布"],
 ] as const;
@@ -131,6 +132,7 @@ export function App() {
   const [telemetryPreferences, setTelemetryPreferences] = useState<TelemetryPreferencesState | null>(null);
   const [privacySettingsOpen, setPrivacySettingsOpen] = useState(false);
   const [telemetryBusy, setTelemetryBusy] = useState(false);
+  const [inputMenuOpen, setInputMenuOpen] = useState(false);
   const missingEngines = store.engines.filter((engine) => !engineReady(engine));
   const completed = useMemo(() => store.projects.filter((project) => project.status === "completed"), [store.projects]);
   const unfinished = useMemo(() => store.projects.filter((project) => project.status !== "completed"), [store.projects]);
@@ -250,7 +252,7 @@ export function App() {
     store.setError(null);
     try {
       const result = await probeAndPlan(path, quality);
-      store.setAnalysis(result.video, result.plan, result.estimate);
+      store.setAnalysis(result.inputType, result.video, result.imageSequence, result.plan, result.estimate);
       store.setPhase("idle");
     } catch (error) {
       store.setError(messageOf(error));
@@ -258,9 +260,17 @@ export function App() {
     }
   };
 
-  const chooseVideo = async () => {
-    const selected = await selectVideo();
-    if (selected) { store.setVideoPath(selected); await analyze(selected, store.quality); }
+  const chooseInput = async (inputType: InputType) => {
+    const selected = inputType === "images" ? await selectImageSequence() : await selectVideo();
+    if (selected) {
+      store.setInputPath(selected, inputType);
+      await analyze(selected, store.quality);
+    }
+  };
+
+  const chooseInputType = (inputType: InputType) => {
+    setInputMenuOpen(false);
+    if (inputType !== store.inputType) store.setInputPath(null, inputType);
   };
 
   const chooseRoot = async () => {
@@ -275,7 +285,7 @@ export function App() {
 
   const chooseQuality = async (quality: Quality) => {
     store.setQuality(quality);
-    if (store.videoPath) await analyze(store.videoPath, quality);
+    if (store.inputPath) await analyze(store.inputPath, quality);
   };
 
   const requestCancellation = async () => {
@@ -294,14 +304,19 @@ export function App() {
   };
 
   const generate = async () => {
-    if (!store.videoPath || !store.plan || !store.projectsRoot) return;
+    if (!store.inputPath || !store.plan || !store.projectsRoot) return;
+    if (
+      store.inputType === "images"
+      && store.imageSequence?.requiresLargeSequenceConfirmation
+      && !(await confirmLargeImageSequence(store.imageSequence.imageCount))
+    ) return;
     clearCancellationFeedback();
     runElapsedOffset.current = 0;
     runStartedAt.current = Date.now();
     setLiveElapsedMs(0);
     store.beginRun();
     try {
-      const result = await startPipeline(store.videoPath, store.quality, store.projectsRoot);
+      const result = await startPipeline(store.inputPath, store.quality, store.projectsRoot);
       setLiveElapsedMs((current) => Math.max(current, result.durationMs));
       store.setResult(result);
       store.setPhase("completed");
@@ -441,10 +456,27 @@ export function App() {
         <div className="pane-header"><h1>01 创建新任务</h1><span className={isRunning ? "run-state active" : "run-state"}>{isRunning ? "运行中" : "待命"}</span></div>
 
         <div className="form-section">
-          <label className="field-label">输入视频</label>
-          <button className="path-picker" type="button" disabled={isRunning} onClick={() => void chooseVideo()}>
-            <Clapperboard size={18} /><span><strong>{store.videoPath ? basename(store.videoPath) : "选择 MP4 或 MOV 视频"}</strong><small>{store.videoPath ?? "从本机选择环绕拍摄素材"}</small></span><FolderOpen size={16} />
-          </button>
+          <label className="field-label">输入素材</label>
+          <div className="input-picker">
+            <div className="input-type-picker">
+              <button className="input-picker-toggle" type="button" disabled={isRunning} aria-label="选择输入素材类型" aria-expanded={inputMenuOpen} onClick={() => setInputMenuOpen((open) => !open)}>
+                {store.inputType === "images" ? <Images size={16} /> : <Clapperboard size={16} />}
+                <span>{store.inputType === "images" ? "图片" : "视频"}</span>
+                <ChevronDown size={14} />
+              </button>
+              {inputMenuOpen && <div className="input-picker-menu" role="menu">
+                <button type="button" role="menuitemradio" aria-checked={store.inputType === "video"} onClick={() => chooseInputType("video")}><Clapperboard size={15} /><span><strong>视频</strong><small>MP4 或 MOV</small></span></button>
+                <button type="button" role="menuitemradio" aria-checked={store.inputType === "images"} onClick={() => chooseInputType("images")}><Images size={15} /><span><strong>图片</strong><small>JPG、JPEG 或 PNG 文件夹</small></span></button>
+              </div>}
+            </div>
+            <button className="path-picker" type="button" disabled={isRunning} onClick={() => void chooseInput(store.inputType)}>
+              {store.inputType === "images" ? <Images size={18} /> : <Clapperboard size={18} />}
+              <span>
+                <strong>{store.inputPath ? basename(store.inputPath) : store.inputType === "images" ? "选择图片序列文件夹" : "选择 MP4 或 MOV 视频"}</strong>
+                <small>{store.inputPath ?? (store.inputType === "images" ? "点击选择包含 JPG、JPEG 或 PNG 的文件夹" : "点击选择本机视频文件")}</small>
+              </span>
+            </button>
+          </div>
         </div>
 
         <div className="form-section">
@@ -472,21 +504,23 @@ export function App() {
           </span>
         </div>
 
-        {store.video && store.plan && <div className="source-metrics">
-          <span><small>素材时长</small><b>{formatVideoDuration(store.video.duration)}</b></span>
-          <span><small>分辨率</small><b>{store.video.width} × {store.video.height}</b></span>
-          <span><small>预计帧数</small><b>约 {store.plan.estimatedFrames.toLocaleString()}</b></span>
+        {(store.video || store.imageSequence) && store.plan && <div className="source-metrics">
+          <span><small>{store.inputType === "images" ? "图片数量" : "素材时长"}</small><b>{store.imageSequence ? `${store.imageSequence.imageCount.toLocaleString()} 张` : formatVideoDuration(store.video!.duration)}</b></span>
+          <span><small>分辨率</small><b>{store.imageSequence?.width ?? store.video?.width} × {store.imageSequence?.height ?? store.video?.height}</b></span>
+          <span><small>{store.inputType === "images" ? "处理图片" : "预计帧数"}</small><b>{store.inputType === "images" ? "全部保留" : `约 ${store.plan.estimatedFrames.toLocaleString()}`}</b></span>
           <span title={store.estimate?.basis}><small>预计时长</small><b>{store.estimate ? `约 ${formatDuration(store.estimate.estimatedMs)}` : "分析中"}</b>{store.estimate && <em>{formatDuration(store.estimate.lowerBoundMs)}–{formatDuration(store.estimate.upperBoundMs)}</em>}</span>
         </div>}
 
-        {store.video?.hasAlpha && <div className="alpha-source-status" role="status">
+        {(store.video?.hasAlpha || store.imageSequence?.hasAlpha) && <div className="alpha-source-status" role="status">
           <Blend size={17} />
-          <span><strong>检测到 Alpha 通道</strong><small>将自动提取透明画面和 COLMAP Mask · {store.video.pixelFormat || "Alpha"}</small></span>
+          <span><strong>{store.inputType === "images" ? "检测到透明图片" : "检测到 Alpha 通道"}</strong><small>{store.inputType === "images" ? "将保留 PNG Alpha 并自动生成 COLMAP Mask" : `将自动提取透明画面和 COLMAP Mask · ${store.video?.pixelFormat || "Alpha"}`}</small></span>
         </div>}
 
-        {!isRunning && <button className="primary-action" type="button" disabled={!store.videoPath || !store.plan || !store.projectsRoot || store.phase === "analyzing" || missingEngines.length > 0} onClick={() => void generate()}>
+        {store.imageSequence?.requiresLargeSequenceConfirmation && <div className="sequence-warning" role="status"><CircleAlert size={16} /><span><strong>大型图片序列</strong><small>超过 500 张图片，穷举匹配可能需要较长时间和更多磁盘空间；开始生成前会再次确认。</small></span></div>}
+
+        {!isRunning && <button className="primary-action" type="button" disabled={!store.inputPath || !store.plan || !store.projectsRoot || store.phase === "analyzing" || missingEngines.length > 0} onClick={() => void generate()}>
           {store.phase === "analyzing" ? <LoaderCircle className="spin" size={17} /> : <Play size={16} fill="currentColor" />}
-          {store.phase === "analyzing" ? "正在分析视频" : "开始生成"}
+          {store.phase === "analyzing" ? "正在分析素材" : "开始生成"}
         </button>}
 
         {(isRunning || store.events.length > 0) && <section className="live-process">

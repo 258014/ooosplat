@@ -23,7 +23,7 @@ const event = (sequence: number, progress: number): PipelineEvent => ({
 describe("app store", () => {
   beforeEach(() => {
     useAppStore.setState({
-      videoPath: null, projectsRoot: "", projects: [], quality: "balanced", colmapAcceleration: null, video: null,
+      inputPath: null, inputType: "video", projectsRoot: "", projects: [], quality: "balanced", colmapAcceleration: null, video: null, imageSequence: null,
       plan: null, estimate: null, engines: [], phase: "idle", progress: 0, progressMessage: "",
       latestEvent: null, events: [], result: null, error: null,
     });
@@ -42,6 +42,18 @@ describe("app store", () => {
     expect(useAppStore.getState().quality).toBe("high");
     expect(useAppStore.getState().plan).toBeNull();
     expect(useAppStore.getState().estimate).toBeNull();
+  });
+
+  it("switches input type and clears the previous analysis", () => {
+    useAppStore.setState({
+      video: { duration: 1, width: 1, height: 1, fps: 30, totalFrames: 30, codec: "h264", rotation: 0, pixelFormat: "yuv420p", hasAlpha: false },
+      plan: { retentionRatio: 1, samplingFps: 30, estimatedFrames: 30 },
+    });
+    useAppStore.getState().setInputPath("E:\\Photos", "images");
+    expect(useAppStore.getState().inputType).toBe("images");
+    expect(useAppStore.getState().inputPath).toBe("E:\\Photos");
+    expect(useAppStore.getState().video).toBeNull();
+    expect(useAppStore.getState().plan).toBeNull();
   });
 
   it("keeps progress monotonic and ignores stale sequenced events", () => {

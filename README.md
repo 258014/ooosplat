@@ -10,7 +10,7 @@
   <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.3.0"><strong>⬇️ 下载 OOOSplat 0.3.0（Windows / macOS / Ubuntu）</strong></a>
 </p>
 
-OOOSplat 是一款将普通环绕拍摄视频一键转换为 3D Gaussian Splatting 的本地桌面应用。选择视频、项目目录和质量档位后，应用会自动完成抽帧、相机重建、训练与 PLY 发布，并可直接预览、调整和导出结果。
+OOOSplat 是一款将普通环绕拍摄视频或图片序列一键转换为 3D Gaussian Splatting 的本地桌面应用。选择素材、项目目录和质量档位后，应用会自动完成画面准备、相机重建、训练与 PLY 发布，并可直接预览、调整和导出结果。
 
 Windows 和 Apple Silicon macOS Alpha 均随应用提供 FFmpeg、FFprobe、COLMAP 和 Brush；Linux 支持目前仅作为 Ubuntu 24.04 LTS x86_64 Alpha 提供。整个生成流程使用本机 CPU 和 GPU，输入素材、工程文件、模型与日志无需上传到云端重建或训练服务。React 界面通过 Tauri 直接调用本机 Rust 后端，不需要远程服务或 localhost API。
 
@@ -18,11 +18,11 @@ Windows 和 Apple Silicon macOS Alpha 均随应用提供 FFmpeg、FFprobe、COLM
 
 查看 [OOOSplat Roadmap](ROADMAP.md) 了解后续规划。
 
-> 当前版本可从视频生成并管理 `final.ply`，并在应用内完成 Gaussian Splat 预览、整体 Transform 编辑、动画预览以及非破坏式导出。
+> 当前版本可从视频或图片序列生成并管理 `final.ply`，并在应用内完成 Gaussian Splat 预览、整体 Transform 编辑、动画预览以及非破坏式导出。
 
 ## 核心优势
 
-- **一键生成高斯泼溅**：只需选择输入视频、项目目录和质量档位，即可自动完成 FFmpeg 抽帧、COLMAP 相机重建、Brush 训练和 `final.ply` 发布，无需手动拼接命令或配置引擎。
+- **一键生成高斯泼溅**：只需选择输入视频或图片序列、项目目录和质量档位，即可自动完成画面准备、COLMAP 相机重建、Brush 训练和 `final.ply` 发布，无需手动拼接命令或配置引擎。
 - **全平台兼容**：支持 Windows、macOS 和 Linux，可在三大主流桌面系统上完成本地高斯泼溅生成；具体系统与处理器要求请参阅下方兼容性说明。
 - **安全与隐私保护**：素材、抽帧、相机重建数据、高斯模型和日志默认只保存在用户选择的本地项目目录，核心生成流程在本机完成，无需将原始视频、图像或模型上传到第三方重建与训练平台，从而减少数据在网络传输、云端留存和未经授权访问过程中的泄露风险。
 - **完全本地化算力**：重建与训练均在用户自己的电脑上运行，不调用远程计算服务。满足要求时 COLMAP 自动使用本机 NVIDIA GPU 加速，否则回退 CPU，过程和数据始终由用户掌控。
@@ -39,8 +39,9 @@ Windows 和 Apple Silicon macOS Alpha 均随应用提供 FFmpeg、FFprobe、COLM
 
 ## 主要功能
 
-- 从 MP4、MOV 视频创建 Gaussian Splatting 项目。
-- 自动完成视频分析、均匀抽帧、特征提取、顺序匹配、相机重建、Brush 训练和 PLY 发布。
+- 从 MP4、MOV 视频，或包含 JPG、JPEG、PNG 的图片序列文件夹创建 Gaussian Splatting 项目。
+- 视频使用均匀抽帧和顺序匹配；图片序列保留全部图片并使用共享相机、穷举匹配和现有增量 Mapper。
+- 自动检测透明 PNG，保留 Alpha 供 Brush 使用，并生成 COLMAP Mask 排除完全透明区域。
 - Windows 安装包内置 CUDA 版 COLMAP；macOS Alpha 内置 arm64 CPU 版 COLMAP；Ubuntu 使用系统 CPU 版 COLMAP。三个平台均使用固定并校验的 FFmpeg/Brush 方案。
 - COLMAP 会自动检查内置 CUDA 运行时、NVIDIA 驱动版本和显卡 Compute Capability，满足要求时使用 GPU 加速特征提取与匹配，否则自动回退到 CPU。
 - 实时显示处理阶段、引擎输出、关键计数、累计耗时和最多 500 条界面日志。
@@ -67,11 +68,11 @@ Windows 和 Apple Silicon macOS Alpha 均随应用提供 FFmpeg、FFprobe、COLM
 ## 处理流程
 
 ```text
-输入视频
+输入视频或图片序列
   │
-  ├─ FFprobe：读取时长、分辨率、帧率和总帧数
-  ├─ FFmpeg：按照质量档位均匀抽取画面
-  ├─ COLMAP：自动选择 CPU 或 CUDA GPU 进行特征提取与顺序匹配
+  ├─ 视频：FFprobe 分析，FFmpeg 按质量档位均匀抽帧
+  ├─ 图片：按文件名排序并保留全部图片；透明 PNG 自动生成 Mask
+  ├─ COLMAP：自动选择 CPU 或 CUDA GPU 提取特征；视频顺序匹配，图片穷举匹配
   ├─ COLMAP：增量重建并验证注册率和三维点
   ├─ Brush：使用可用 GPU 训练 Gaussian Splats
   └─ 校验 PLY 后原子发布为 final.ply
@@ -86,7 +87,7 @@ Windows 和 Apple Silicon macOS Alpha 均随应用提供 FFmpeg、FFprobe、COLM
 - 视频导出需要 WebView2 提供 WebCodecs AVC 编码能力；不支持时仍可在“动画”模式播放效果，但“导出视频”会显示不可用原因。
 - Brush 训练需要可用的 GPU 图形后端，建议使用独立显卡。
 - COLMAP 的 CUDA 加速需要 NVIDIA 显卡、Windows 驱动 528.33 或更高版本，以及 Compute Capability 5.0 或更高版本；不满足要求时程序会自动使用 CPU，无需用户配置。
-- 项目磁盘需要容纳源视频副本、抽帧图像、COLMAP 数据、Brush 中间文件和最终 PLY。长视频或精细档位可能占用大量空间。
+- 项目磁盘需要容纳源素材副本、输入图像、COLMAP 数据、Brush 中间文件和最终 PLY。长视频、大型图片序列或精细档位可能占用大量空间。
 - 安装模式为整机安装，安装时可能需要管理员权限。
 
 Windows 内置的 COLMAP 使用同时支持 CPU 与 CUDA GPU 的构建，运行前会自动选择可用后端；Brush 训练使用可用图形后端，二者的 GPU 检测与运行机制相互独立。
@@ -134,7 +135,7 @@ sudo apt install ./OOOSplat-0.3.0-x64-linux.deb
 
 1. Windows 运行 `OOOSplat-0.3.0-x64-windows.exe`；Apple Silicon Mac 打开 `OOOSplat-0.3.0-arm64-macos.dmg` 并将 OOOSplat 拖入“应用程序”；Ubuntu 24.04 使用 `sudo apt install ./OOOSplat-0.3.0-x64-linux.deb`。
 2. 启动 OOOSplat，确认顶栏中的内置引擎状态正常。
-3. 在“01 创建新任务”中选择输入视频。
+3. 在“01 创建新任务”中选择输入视频；如需输入图片，打开输入框右侧菜单并选择图片序列文件夹。
 4. 选择项目根目录；程序会记住上次使用的位置。
 5. 选择“快速”“均衡”或“精细”档位。
 6. 查看自动检测到的 COLMAP 加速状态及原因，然后点击“开始生成”。
@@ -146,7 +147,7 @@ sudo apt install ./OOOSplat-0.3.0-x64-linux.deb
 
 - 拖动左右面板之间的分界线可以调整宽度；双击分界线恢复默认比例。
 - 点击右下角百分比按钮可缩小、恢复或放大整个界面。
-- 任务运行期间不可修改视频、项目目录和质量档位。
+- 任务运行期间不可修改输入素材、项目目录和质量档位。
 - 点击“删除”会回收整个项目目录，包括源视频副本和所有中间文件；如果移入回收站失败，程序不会降级为永久删除。
 
 ## 质量档位
@@ -164,7 +165,7 @@ sudo apt install ./OOOSplat-0.3.0-x64-linux.deb
 每次生成都会在项目根目录下创建一个独立文件夹：
 
 ```text
-<项目根目录>\<yyyyMMdd-HHmmss_视频名>\
+<项目根目录>\<yyyyMMdd-HHmmss_素材名>\
   final.ply             最终 Gaussian Splatting 文件
   project.json          项目元数据与结果指标
   edit.ply              当前编辑结果；再次保存时安全替换（可选）
@@ -172,9 +173,11 @@ sudo apt install ./OOOSplat-0.3.0-x64-linux.deb
   preview-2.mp4         后续视频导出自动编号（可选）
   state.json            流水线状态
   source\
-    input.<ext>         源视频副本
+    input.<ext>         源视频副本（视频项目）
+    images\             规范化的源图片副本（图片序列项目）
   work\
-    frames\             FFmpeg 抽取的画面
+    frames\             抽取或准备后的输入画面
+    masks\              透明素材对应的 COLMAP Mask（按需）
     colmap\             COLMAP 数据库与稀疏重建
     brush\              Brush 数据集与训练中间文件
   logs\                 FFmpeg、COLMAP、Brush 等完整日志
@@ -309,6 +312,9 @@ cargo run --manifest-path src-tauri\Cargo.toml --bin splatstudio -- extract "D:\
 
 # 运行完整流水线（自动检测并选择 COLMAP GPU 或 CPU）
 cargo run --manifest-path src-tauri\Cargo.toml --bin splatstudio -- generate "D:\Videos\orbit.mp4" --projects-root "D:\Splat Projects" --quality balanced
+
+# 图片序列使用同一命令，传入文件夹即可
+cargo run --manifest-path src-tauri\Cargo.toml --bin splatstudio -- generate "D:\Photos\object" --projects-root "D:\Splat Projects" --quality balanced
 ```
 
 开发或诊断时可以通过全局参数 `--engine-dir <路径>`，或环境变量 `OOOSPLAT_ENGINE_DIR`，覆盖默认引擎目录。

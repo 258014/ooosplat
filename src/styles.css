@@ -91,6 +91,18 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .path-picker strong { font-size: 14px; }
 .path-picker small { color: var(--muted); font: 500 12px/1.35 "Cascadia Mono", "Microsoft YaHei UI", monospace; }
 .path-picker.compact { min-height: 60px; }
+.input-picker { position: relative; display: grid; grid-template-columns: 108px minmax(0, 1fr); }
+.input-picker .path-picker { grid-template-columns: 24px minmax(0, 1fr); border-left: 0; }
+.input-type-picker { position: relative; min-width: 0; }
+.input-picker-toggle { width: 100%; height: 100%; min-height: 66px; padding: 0 12px; display: grid; grid-template-columns: 18px minmax(0, 1fr) 14px; place-items: center; gap: 7px; color: var(--ink); background: transparent; border: 1px solid var(--line-dark); cursor: pointer; font-size: 13px; font-weight: 700; }
+.input-picker-toggle > svg:first-child { color: var(--blue); }
+.input-picker-toggle:hover:not(:disabled), .input-picker-toggle[aria-expanded="true"] { color: var(--blue); background: #f1f4fb; border-color: var(--blue); }
+.input-picker-menu { position: absolute; z-index: 50; top: calc(100% + 6px); left: 0; width: 230px; padding: 5px; isolation: isolate; background: #fff; border: 1px solid var(--line-dark); box-shadow: 0 12px 30px rgba(24, 39, 67, .2); }
+.input-picker-menu button { width: 100%; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 8px; padding: 9px 10px; color: var(--ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
+.input-picker-menu button:hover, .input-picker-menu button[aria-checked="true"] { background: #edf2fd; color: var(--blue); }
+.input-picker-menu span { display: grid; gap: 2px; }
+.input-picker-menu strong { font-size: 12px; }
+.input-picker-menu small { color: var(--muted); font-size: 10px; }
 .field-note { margin: 8px 0 0; color: var(--faint); font-size: 11px; line-height: 1.6; }
 
 .quality-list { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
@@ -123,6 +135,10 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .alpha-source-status > span { min-width: 0; display: grid; gap: 4px; }
 .alpha-source-status strong { font-size: 12px; }
 .alpha-source-status small { color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.sequence-warning { display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: center; gap: 10px; padding: 13px 0; color: #9a6500; border-bottom: 1px solid var(--line); }
+.sequence-warning > span { display: grid; gap: 4px; }
+.sequence-warning strong { font-size: 12px; }
+.sequence-warning small { color: var(--muted); font-size: 11px; line-height: 1.45; }
 .source-metrics em { color: var(--faint); font: 400 9px/1.2 "Cascadia Mono", monospace; white-space: nowrap; }
 .primary-action { width: 100%; height: 48px; margin-top: 20px; padding: 0 15px; display: flex; align-items: center; justify-content: center; gap: 9px; color: white; background: var(--blue); border: 0; cursor: pointer; font-size: 13px; font-weight: 700; transition: background 150ms; }
 .primary-action:hover:not(:disabled) { background: var(--blue-dark); }

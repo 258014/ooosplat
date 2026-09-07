@@ -10,7 +10,7 @@
   <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.3.0"><strong>⬇️ Download OOOSplat 0.3.0 for Windows, macOS, or Ubuntu</strong></a>
 </p>
 
-OOOSplat is a local desktop application that turns an ordinary orbit video into a 3D Gaussian Splatting project in one workflow. Choose a video, project directory, and quality preset, and OOOSplat automatically handles frame extraction, camera reconstruction, training, PLY publishing, preview, adjustment, and export.
+OOOSplat is a local desktop application that turns an ordinary orbit video or image sequence into a 3D Gaussian Splatting project in one workflow. Choose source media, a project directory, and a quality preset, and OOOSplat automatically handles image preparation, camera reconstruction, training, PLY publishing, preview, adjustment, and export.
 
 Windows and the Apple Silicon macOS Alpha provide FFmpeg, FFprobe, COLMAP, and Brush with the application. Linux support remains limited to an Ubuntu 24.04 LTS x86_64 Alpha. Every generation stage runs on the user's own CPU and GPU; input media, project data, models, and logs do not need to be uploaded to a cloud reconstruction or training service. The React interface calls the local Rust backend directly, with no remote service or localhost API required.
 
@@ -22,7 +22,7 @@ See the [OOOSplat Roadmap](ROADMAP.md) for planned work.
 
 ## Why OOOSplat
 
-- **One-click Gaussian generation**: Select an input video, project directory, and quality preset. OOOSplat then runs FFmpeg frame extraction, COLMAP camera reconstruction, Brush training, and `final.ply` publishing without manual engine setup or command-line orchestration.
+- **One-click Gaussian generation**: Select an input video or image-sequence folder, project directory, and quality preset. OOOSplat then runs image preparation, COLMAP camera reconstruction, Brush training, and `final.ply` publishing without manual engine setup or command-line orchestration.
 - **Cross-platform compatibility**: Supports Windows, macOS, and Linux, bringing local Gaussian Splat generation to all three major desktop platforms. See the compatibility section below for specific OS and processor requirements.
 - **Security and privacy protection**: Source media, extracted frames, camera reconstruction data, Gaussian models, and logs stay in the user-selected local project directory by default. The core generation workflow runs on the user's machine, so original videos, images, and models do not need to be uploaded to third-party reconstruction or training platforms. This reduces exposure risks during network transfer, cloud retention, and unauthorized access.
 - **Fully local compute**: Reconstruction and training run on the user's own machine without remote compute services. COLMAP automatically uses a compatible local NVIDIA GPU when available and falls back to CPU otherwise, keeping both processing and data under the user's control.
@@ -39,8 +39,9 @@ See the [OOOSplat Roadmap](ROADMAP.md) for planned work.
 
 ## Key Features
 
-- Create Gaussian Splatting projects from MP4 and MOV videos.
-- Automatically run video analysis, uniform frame extraction, feature extraction, sequential matching, camera reconstruction, Brush training, and PLY publishing.
+- Create Gaussian Splatting projects from MP4/MOV videos or folders containing JPG, JPEG, and PNG images.
+- Videos use uniform frame extraction and sequential matching. Image sequences keep every image and use a shared camera, exhaustive matching, and the existing incremental Mapper.
+- Detect transparent PNG images automatically, preserve Alpha for Brush, and generate COLMAP masks for transparent regions.
 - Bundle CUDA-enabled COLMAP on Windows and arm64 CPU-only COLMAP on macOS; Ubuntu uses its system CPU COLMAP. FFmpeg and Brush follow pinned, verified platform policies.
 - Automatically check the bundled CUDA runtime, NVIDIA driver version, and GPU Compute Capability. COLMAP uses GPU acceleration for feature extraction and matching when the requirements are met, and otherwise falls back to CPU.
 - Show processing stages, engine output, key counters, elapsed time, and up to 500 UI log entries in real time.
@@ -67,11 +68,11 @@ See the [OOOSplat Roadmap](ROADMAP.md) for planned work.
 ## Processing Pipeline
 
 ```text
-Input video
+Input video or image sequence
   │
-  ├─ FFprobe: read duration, resolution, frame rate, and frame count
-  ├─ FFmpeg: extract frames uniformly for the selected quality preset
-  ├─ COLMAP: automatically select CPU or CUDA GPU for feature extraction and sequential matching
+  ├─ Video: inspect with FFprobe and extract frames uniformly with FFmpeg
+  ├─ Images: sort by filename, keep all images, and generate masks for transparent PNGs
+  ├─ COLMAP: auto-select CPU/CUDA for features; sequential matching for video, exhaustive for images
   ├─ COLMAP: incremental reconstruction and registration validation
   ├─ Brush: train Gaussian Splats with an available GPU backend
   └─ Validate the PLY and atomically publish final.ply
@@ -86,7 +87,7 @@ As long as COLMAP produces at least one registered image and valid 3D points, th
 - Video export requires WebCodecs AVC support in WebView2. Animation mode remains available when encoding is unavailable, and the UI reports why export is disabled.
 - An available GPU graphics backend for Brush training; a discrete GPU is recommended.
 - COLMAP CUDA acceleration requires an NVIDIA GPU, Windows driver 528.33 or newer, and Compute Capability 5.0 or higher. OOOSplat automatically uses CPU when these requirements are not met; no manual configuration is required.
-- Enough disk space for a source-video copy, extracted frames, COLMAP data, Brush intermediate files, and the final PLY. Long videos and higher quality presets can require substantial space.
+- Enough disk space for source-media copies, input images, COLMAP data, Brush intermediate files, and the final PLY. Long videos, large image sequences, and higher quality presets can require substantial space.
 - The installer uses a per-machine installation and may require administrator privileges.
 
 The COLMAP build bundled on Windows supports both CPU and CUDA GPU execution. OOOSplat automatically selects the available backend before each task. Brush uses its own available graphics backend; its GPU detection and runtime are independent of COLMAP.
@@ -134,7 +135,7 @@ The `.deb` installs FFmpeg, FFprobe, and CPU COLMAP through Ubuntu's package man
 
 1. On Windows, run `OOOSplat-0.3.0-x64-windows.exe`. On an Apple Silicon Mac, open `OOOSplat-0.3.0-arm64-macos.dmg` and drag OOOSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./OOOSplat-0.3.0-x64-linux.deb`.
 2. Start OOOSplat and confirm that the bundled engine status in the top bar is healthy.
-3. Select an input video under “01 Create New Task.”
+3. Select an input video under “01 Create New Task,” or use the input field's menu to choose an image-sequence folder.
 4. Choose the projects root; OOOSplat remembers the last location.
 5. Select the Fast, Balanced, or Detailed quality preset.
 6. Review the automatically detected COLMAP acceleration status and its explanation, then select “Start Generation.”
@@ -146,7 +147,7 @@ Usage notes:
 
 - Drag the divider between the panels to resize them; double-click it to restore the default ratio.
 - Use the percentage button in the lower-right corner to reduce, reset, or increase the interface scale.
-- The video, project directory, and quality preset cannot be changed while a task is running.
+- The input media, project directory, and quality preset cannot be changed while a task is running.
 - “Delete” moves the complete project—including the source copy and intermediate files—to the Recycle Bin. OOOSplat does not fall back to permanent deletion if that operation fails.
 
 ## Quality Presets
@@ -164,7 +165,7 @@ FFmpeg performs frame reduction; COLMAP does not reduce the number of frames. OO
 Each generation creates a separate directory under the projects root:
 
 ```text
-<projects-root>\<yyyyMMdd-HHmmss_video-name>\
+<projects-root>\<yyyyMMdd-HHmmss_source-name>\
   final.ply             Final Gaussian Splatting file
   project.json          Project metadata and result metrics
   edit.ply              Current edited result; safely replaced on later saves (optional)
@@ -172,9 +173,11 @@ Each generation creates a separate directory under the projects root:
   preview-2.mp4         Later video exports are automatically numbered
   state.json            Pipeline state
   source\
-    input.<ext>         Source-video copy
+    input.<ext>         Source-video copy (video projects)
+    images\             Normalized source copies (image-sequence projects)
   work\
-    frames\             Frames extracted by FFmpeg
+    frames\             Extracted or prepared input images
+    masks\              COLMAP masks for transparent input (when needed)
     colmap\             COLMAP database and sparse reconstruction
     brush\              Brush dataset and training intermediates
   logs\                 Complete FFmpeg, COLMAP, Brush, and pipeline logs
@@ -309,6 +312,9 @@ cargo run --manifest-path src-tauri\Cargo.toml --bin splatstudio -- extract "D:\
 
 # Run the complete pipeline
 cargo run --manifest-path src-tauri\Cargo.toml --bin splatstudio -- generate "D:\Videos\orbit.mp4" --projects-root "D:\Splat Projects" --quality balanced
+
+# Use the same command with a folder for an image sequence
+cargo run --manifest-path src-tauri\Cargo.toml --bin splatstudio -- generate "D:\Photos\object" --projects-root "D:\Splat Projects" --quality balanced
 ```
 
 For development or diagnostics, use the global `--engine-dir <path>` argument or the `OOOSPLAT_ENGINE_DIR` environment variable to override the default engine directory.

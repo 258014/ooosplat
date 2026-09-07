@@ -118,6 +118,15 @@ License text: licenses/Mediabunny-MPL-2.0.txt
 Upstream source: https://github.com/Vanilagy/mediabunny/tree/v1.52.3
 Distributed source package: https://www.npmjs.com/package/mediabunny/v/1.52.3
 
+image crate
+-----------
+Version: 0.25.10
+Use: Decode JPG/PNG image-sequence inputs and write grayscale COLMAP Alpha masks.
+License: MIT OR Apache-2.0
+Selected distribution license: Apache-2.0
+License text: LICENSE
+Upstream source: https://github.com/image-rs/image/tree/v0.25.10
+
 Exact native engine archive and executable SHA-256 values are recorded in
 engines/manifest.json for Windows, engines/manifest.linux.json for the Ubuntu
 24.04 Alpha, and engines/manifest.macos.json for Apple Silicon macOS.

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { IDENTITY_TRANSFORM, maskBit, setMaskBit, useGaussianTransformStore } from "./gaussianTransformStore";
+import type { GaussianCrop } from "../types/pipeline";
 
 const loadProject = (splatCount = 16) => useGaussianTransformStore.getState().load({
   projectId: "00000000-0000-0000-0000-000000000001",
@@ -78,6 +79,40 @@ describe("GaussianTransformStore", () => {
     useGaussianTransformStore.getState().setTool("sphere");
     expect(useGaussianTransformStore.getState().selectedCount).toBe(0);
     expect(useGaussianTransformStore.getState().selectionMask).toEqual(new Uint8Array(2));
+  });
+
+  it("freezes a crop as one reversible deletion operation before transforming", () => {
+    loadProject();
+    const existing = new Uint8Array(2);
+    setMaskBit(existing, 1, true);
+    useGaussianTransformStore.getState().setInitialDeletedMask(existing);
+    const crop: Exclude<GaussianCrop, null> = { kind: "sphere", center: [1, 2, 3], radius: 4 };
+    useGaussianTransformStore.getState().setTool("sphere");
+    useGaussianTransformStore.getState().beginCropTransaction();
+    useGaussianTransformStore.getState().setCropLive(crop);
+    useGaussianTransformStore.getState().commitCropTransaction();
+    const frozen = existing.slice();
+    setMaskBit(frozen, 2, true);
+    setMaskBit(frozen, 7, true);
+
+    useGaussianTransformStore.getState().commitCropFreeze(crop, frozen);
+    let state = useGaussianTransformStore.getState();
+    expect(state.tool).toBe("transform");
+    expect(state.editing.crop).toBeNull();
+    expect(state.editing.deletedCount).toBe(3);
+
+    state.undo();
+    state = useGaussianTransformStore.getState();
+    expect(state.tool).toBe("sphere");
+    expect(state.editing.crop).toEqual(crop);
+    expect(state.editing.deletedCount).toBe(1);
+    expect(state.deletedMask).toEqual(existing);
+
+    state.redo();
+    state = useGaussianTransformStore.getState();
+    expect(state.tool).toBe("transform");
+    expect(state.editing.crop).toBeNull();
+    expect(state.deletedMask).toEqual(frozen);
   });
 
   it("resets transforms, crop, deletion and history to the original final.ply state", () => {

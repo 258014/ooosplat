@@ -21,6 +21,7 @@ uniform float uOoosplatSelectionCropKind;
 uniform vec3 uOoosplatSelectionCropCenter;
 uniform vec3 uOoosplatSelectionCropSize;
 uniform float uOoosplatSelectionCropRadius;
+uniform float uOoosplatSelectionOperation;
 
 bool cropContains(vec3 center) {
     if (uOoosplatSelectionCropKind < 0.5) return true;
@@ -30,14 +31,20 @@ bool cropContains(vec3 center) {
 
 void process() {
     vec3 center = (uOoosplatModelMatrix * vec4(getCenter(), 1.0)).xyz;
-    vec4 clip = uOoosplatViewProjection * vec4(center, 1.0);
-    vec2 ndc = clip.xy / max(abs(clip.w), 0.000001);
-    bool inside = clip.w > 0.0
-        && ndc.x >= uOoosplatSelectionRect.x && ndc.x <= uOoosplatSelectionRect.z
-        && ndc.y >= uOoosplatSelectionRect.y && ndc.y <= uOoosplatSelectionRect.w
-        && cropContains(center)
-        && loadOoosplatDeleted().r < 0.5;
-    writeOoosplatScratch(vec4(inside ? 1.0 : 0.0));
+    bool deleted = loadOoosplatDeleted().r > 0.5;
+    bool hit;
+    if (uOoosplatSelectionOperation > 0.5) {
+        hit = !deleted && !cropContains(center);
+    } else {
+        vec4 clip = uOoosplatViewProjection * vec4(center, 1.0);
+        vec2 ndc = clip.xy / max(abs(clip.w), 0.000001);
+        hit = !deleted
+            && clip.w > 0.0
+            && ndc.x >= uOoosplatSelectionRect.x && ndc.x <= uOoosplatSelectionRect.z
+            && ndc.y >= uOoosplatSelectionRect.y && ndc.y <= uOoosplatSelectionRect.w
+            && cropContains(center);
+    }
+    writeOoosplatScratch(vec4(hit ? 1.0 : 0.0));
 }
 `;
 
@@ -65,6 +72,13 @@ export function combineSelectionMasks(current: Uint8Array, hit: Uint8Array, mode
   for (let index = 0; index < next.length; index += 1) {
     next[index] = mode === "add" ? next[index] | hit[index] : next[index] & ~hit[index];
   }
+  return next;
+}
+
+export function combineDeletedMasks(current: Uint8Array, outsideCrop: Uint8Array) {
+  if (current.length !== outsideCrop.length) throw new Error("删除位图长度不一致");
+  const next = current.slice();
+  for (let index = 0; index < next.length; index += 1) next[index] |= outsideCrop[index];
   return next;
 }
 
@@ -176,6 +190,7 @@ export class GaussianSelectionController {
       this.processor.setParameter("uOoosplatSelectionCropCenter", center);
       this.processor.setParameter("uOoosplatSelectionCropSize", size);
       this.processor.setParameter("uOoosplatSelectionCropRadius", radius);
+      this.processor.setParameter("uOoosplatSelectionOperation", 0);
       this.processor.process();
       const pixels = await this.scratchTexture.read(0, 0, this.scratchTexture.width, this.scratchTexture.height, { immediate: true }) as Uint8Array;
       const hit = packSelectionTextureData(pixels, this.splatCount);
@@ -183,6 +198,41 @@ export class GaussianSelectionController {
       if (this.destroyed || revision < this.appliedSelectionRevision) return this.selectedMask.slice();
       this.selectedMask = next.slice();
       this.appliedSelectionRevision = revision;
+      this.uploadMask(this.selectedTexture, this.selectedPixels, this.selectedMask);
+      this.refreshWorkBuffer();
+      return next;
+    };
+    return this.enqueue(execute);
+  }
+
+  freezeCrop(crop: Exclude<GaussianCrop, null>, deletedMask: Uint8Array) {
+    const currentDeleted = deletedMask.slice();
+    const revision = ++this.requestedSelectionRevision;
+    const execute = async () => {
+      if (this.destroyed) throw new Error("Gaussian 选择器已销毁");
+      this.validateMask(currentDeleted);
+      if (!masksEqual(this.deletedMask, currentDeleted)) {
+        this.deletedMask = currentDeleted;
+        this.uploadMask(this.deletedTexture, this.deletedPixels, this.deletedMask);
+      }
+      const cropKind = crop.kind === "sphere" ? 1 : 2;
+      const size = crop.kind === "box" ? crop.size : [1, 1, 1];
+      const radius = crop.kind === "sphere" ? crop.radius : 1;
+      this.processor.setParameter("uOoosplatModelMatrix", this.component.entity.getWorldTransform().data);
+      this.processor.setParameter("uOoosplatSelectionCropKind", cropKind);
+      this.processor.setParameter("uOoosplatSelectionCropCenter", crop.center);
+      this.processor.setParameter("uOoosplatSelectionCropSize", size);
+      this.processor.setParameter("uOoosplatSelectionCropRadius", radius);
+      this.processor.setParameter("uOoosplatSelectionOperation", 1);
+      this.processor.process();
+      const pixels = await this.scratchTexture.read(0, 0, this.scratchTexture.width, this.scratchTexture.height, { immediate: true }) as Uint8Array;
+      if (this.destroyed || revision < this.appliedSelectionRevision) throw new Error("Gaussian 裁切结果已过期");
+      const outsideCrop = packSelectionTextureData(pixels, this.splatCount);
+      const next = combineDeletedMasks(this.deletedMask, outsideCrop);
+      this.deletedMask = next.slice();
+      this.selectedMask = new Uint8Array(this.selectedMask.length);
+      this.appliedSelectionRevision = revision;
+      this.uploadMask(this.deletedTexture, this.deletedPixels, this.deletedMask);
       this.uploadMask(this.selectedTexture, this.selectedPixels, this.selectedMask);
       this.refreshWorkBuffer();
       return next;
