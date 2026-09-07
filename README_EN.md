@@ -7,18 +7,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.3.0"><strong>⬇️ Download OOOSplat 0.3.0 for Windows, macOS, or Ubuntu</strong></a>
+  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.0"><strong>⬇️ Download OOOSplat 0.4.0 for Windows, macOS, or Ubuntu</strong></a>
 </p>
 
 OOOSplat is a local desktop application that turns an ordinary orbit video or image sequence into a 3D Gaussian Splatting project in one workflow. Choose source media, a project directory, and a quality preset, and OOOSplat automatically handles image preparation, camera reconstruction, training, PLY publishing, preview, adjustment, and export.
 
 Windows and the Apple Silicon macOS Alpha provide FFmpeg, FFprobe, COLMAP, and Brush with the application. Linux support remains limited to an Ubuntu 24.04 LTS x86_64 Alpha. Every generation stage runs on the user's own CPU and GPU; input media, project data, models, and logs do not need to be uploaded to a cloud reconstruction or training service. The React interface calls the local Rust backend directly, with no remote service or localhost API required.
 
-Current version: **0.3.0**
+Current version: **0.4.0**
 
-See the [OOOSplat Roadmap](ROADMAP.md) for planned work.
+See the [OOOSplat Roadmap](ROADMAP_EN.md) for planned work.
 
-> The current release generates and manages `final.ply`, previews Gaussian Splats inside OOOSplat, edits whole-model transforms, plays staged animations, and exports non-destructive results.
+> Version 0.4.0 adds image-sequence input, automatic masks for transparent MOV/PNG media, stage-level pipeline resume, and rectangle, sphere, and box Gaussian editing while preserving the original `final.ply`.
 
 ## Why OOOSplat
 
@@ -41,6 +41,7 @@ See the [OOOSplat Roadmap](ROADMAP.md) for planned work.
 
 - Create Gaussian Splatting projects from MP4/MOV videos or folders containing JPG, JPEG, and PNG images.
 - Videos use uniform frame extraction and sequential matching. Image sequences keep every image and use a shared camera, exhaustive matching, and the existing incremental Mapper.
+- Detect Alpha channels in transparent MOV files, extract RGBA PNG frames and matching COLMAP masks in one pass, and preserve transparency for Brush training.
 - Detect transparent PNG images automatically, preserve Alpha for Brush, and generate COLMAP masks for transparent regions.
 - Bundle CUDA-enabled COLMAP on Windows and arm64 CPU-only COLMAP on macOS; Ubuntu uses its system CPU COLMAP. FFmpeg and Brush follow pinned, verified platform policies.
 - Automatically check the bundled CUDA runtime, NVIDIA driver version, and GPU Compute Capability. COLMAP uses GPU acceleration for feature extraction and matching when the requirements are met, and otherwise falls back to CPU.
@@ -49,6 +50,8 @@ See the [OOOSplat Roadmap](ROADMAP.md) for planned work.
 - Cancel tasks and terminate the full child-process tree with a Windows Job Object or Unix process group.
 - Choose a custom projects root, defaulting to `Documents\SplatStudio\Projects`.
 - Track completed, failed, interrupted, and cancelled tasks.
+- Resume interrupted pipelines at stage boundaries. OOOSplat validates frame, mask, COLMAP database, sparse reconstruction, and PLY checkpoints, reuses trusted stages, and safely reruns from the earliest invalid stage.
+- Estimate generation time from source size, quality preset, and recent successful local projects, while continuously updating Brush training progress.
 - Preview completed `.ply` projects under “03 Preview” with Orbit, Pan, and Zoom. Switching between Adjust and Animation does not reload the model or reset the camera.
 - Use Adjust mode to edit whole-model position, rotation, and uniform scale, with undo and redo.
 - Use rectangle, sphere, and box Gaussian selection tools. Rectangle selection projects centers through the scene for non-destructive deletion, while sphere and box crops keep points inside the live selection volume.
@@ -70,7 +73,7 @@ See the [OOOSplat Roadmap](ROADMAP.md) for planned work.
 ```text
 Input video or image sequence
   │
-  ├─ Video: inspect with FFprobe and extract frames uniformly with FFmpeg
+  ├─ Video: inspect with FFprobe and extract frames uniformly with FFmpeg; emit RGBA frames and masks for transparent media
   ├─ Images: sort by filename, keep all images, and generate masks for transparent PNGs
   ├─ COLMAP: auto-select CPU/CUDA for features; sequential matching for video, exhaustive for images
   ├─ COLMAP: incremental reconstruction and registration validation
@@ -82,7 +85,7 @@ As long as COLMAP produces at least one registered image and valid 3D points, th
 
 ## System Requirements
 
-- Windows 10 or Windows 11, x64.
+- Windows 11, x64.
 - WebView2 Runtime support.
 - Video export requires WebCodecs AVC support in WebView2. Animation mode remains available when encoding is unavailable, and the UI reports why export is disabled.
 - An available GPU graphics backend for Brush training; a discrete GPU is recommended.
@@ -123,19 +126,19 @@ sudo apt install -y \
 
 Install a working Vulkan driver for the graphics adapter, such as the proprietary NVIDIA driver or Mesa for AMD/Intel. Ubuntu 24.04's non-CUDA COLMAP package automatically uses the CPU, while Brush selects an available graphics backend at runtime. Fully CPU-only software Vulkan has not yet been validated end to end.
 
-After downloading the `OOOSplat-0.3.0-x64-linux` Artifact from GitHub Actions, install it with:
+After downloading the `OOOSplat-0.4.0-x64-linux` Artifact from GitHub Actions, install it with:
 
 ```bash
-sudo apt install ./OOOSplat-0.3.0-x64-linux.deb
+sudo apt install ./OOOSplat-0.4.0-x64-linux.deb
 ```
 
 The `.deb` installs FFmpeg, FFprobe, and CPU COLMAP through Ubuntu's package manager; the pinned Brush runtime is included in the package.
 
 ## Installation and Use
 
-1. On Windows, run `OOOSplat-0.3.0-x64-windows.exe`. On an Apple Silicon Mac, open `OOOSplat-0.3.0-arm64-macos.dmg` and drag OOOSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./OOOSplat-0.3.0-x64-linux.deb`.
+1. On Windows, run `OOOSplat-0.4.0-x64-windows.exe`. On an Apple Silicon Mac, open `OOOSplat-0.4.0-arm64-macos.dmg` and drag OOOSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./OOOSplat-0.4.0-x64-linux.deb`.
 2. Start OOOSplat and confirm that the bundled engine status in the top bar is healthy.
-3. Select an input video under “01 Create New Task,” or use the input field's menu to choose an image-sequence folder.
+3. Under “01 Create New Task,” choose Video or Images from the input-type menu, then click the input field to select a video file or image-sequence folder.
 4. Choose the projects root; OOOSplat remembers the last location.
 5. Select the Fast, Balanced, or Detailed quality preset.
 6. Review the automatically detected COLMAP acceleration status and its explanation, then select “Start Generation.”
@@ -288,7 +291,7 @@ npm run package:windows
 The NSIS installer is written to:
 
 ```text
-dist-artifacts\OOOSplat-0.3.0-x64-windows.exe
+dist-artifacts\OOOSplat-0.4.0-x64-windows.exe
 ```
 
 Run `npm run setup:engines` before the first build. Tauri's `beforeBuildCommand` automatically runs the engine checks and frontend production build, but it does not access the network implicitly during packaging.

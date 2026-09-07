@@ -5,6 +5,7 @@ import {
   Settings2, Zap,
 } from "lucide-react";
 import appLogo from "../../assets/app-icon.svg";
+import packageMetadata from "../../package.json";
 import { TelemetryPreferences } from "../components/TelemetryPreferences";
 import {
   cancelPipeline, checkEngines, confirmAndDeleteProject, confirmLargeImageSequence,
@@ -444,7 +445,7 @@ export function App() {
   return <main className={isResizing ? "app-shell resizing" : "app-shell"}>
     <div className="interface-frame" style={{ "--ui-scale": uiScale / 100, "--ui-size": `${10000 / uiScale}%` } as CSSProperties}>
     <header className="topbar">
-      <div className="brand-lockup"><span className="brand-mark"><img src={appLogo} alt="" aria-hidden="true" /></span><span className="brand-name">OOO<span>Splat</span></span><span className="version-tag">LOCAL / 0.3.0</span></div>
+      <div className="brand-lockup"><span className="brand-mark"><img src={appLogo} alt="" aria-hidden="true" /></span><span className="brand-name">OOO<span>Splat</span></span><span className="version-tag">LOCAL / {packageMetadata.version}</span></div>
       <div className="topbar-actions">
         {telemetryPreferences && <button className="settings-action" type="button" onClick={() => setPrivacySettingsOpen(true)}><Settings2 size={15} />设置</button>}
         <div className="engine-summary"><span className={missingEngines.length ? "status-light warning" : "status-light"} />{store.engines.length === 0 ? "正在检查内置引擎" : missingEngines.length ? `${missingEngines.length} 个引擎异常` : "FFmpeg · COLMAP · Brush 就绪"}</div>
