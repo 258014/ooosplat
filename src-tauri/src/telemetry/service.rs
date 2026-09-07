@@ -16,6 +16,8 @@ use super::event::{validate_privacy, TelemetryEvent, TelemetryPayload};
 /// Invalid or non-HTTPS configuration fails closed and disables network delivery.
 pub const TELEMETRY_ENDPOINT: Option<&str> = option_env!("OOOSPLAT_TELEMETRY_ENDPOINT");
 const TELEMETRY_TIMEOUT: Duration = Duration::from_secs(4);
+const TELEMETRY_SCHEMA_VERSION: u32 = 2;
+const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,16 +44,19 @@ struct TelemetryConfig {
     consent_decided: bool,
     #[serde(default)]
     last_heartbeat_date: Option<NaiveDate>,
+    #[serde(default)]
+    last_heartbeat_app_version: Option<String>,
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: TELEMETRY_SCHEMA_VERSION,
             install_id: Uuid::new_v4(),
             analytics_enabled: true,
             consent_decided: true,
             last_heartbeat_date: None,
+            last_heartbeat_app_version: None,
         }
     }
 }
@@ -207,18 +212,20 @@ impl TelemetryService {
             if self.ensure_config(&mut state).await.is_err() {
                 return;
             }
-            let (enabled, last_heartbeat_date, install_id) = state
+            let (enabled, heartbeat_already_sent, install_id) = state
                 .config
                 .as_ref()
                 .map(|config| {
                     (
                         config.analytics_enabled,
-                        config.last_heartbeat_date,
+                        config.last_heartbeat_date == Some(today)
+                            && config.last_heartbeat_app_version.as_deref()
+                                == Some(CURRENT_APP_VERSION),
                         config.install_id,
                     )
                 })
-                .unwrap_or((false, None, Uuid::nil()));
-            if !enabled || last_heartbeat_date == Some(today) || state.heartbeat_in_flight {
+                .unwrap_or((false, false, Uuid::nil()));
+            if !enabled || heartbeat_already_sent || state.heartbeat_in_flight {
                 return;
             }
             state.heartbeat_in_flight = true;
@@ -239,6 +246,7 @@ impl TelemetryService {
         };
         if delivered && config.analytics_enabled {
             config.last_heartbeat_date = Some(today);
+            config.last_heartbeat_app_version = Some(CURRENT_APP_VERSION.to_owned());
             let snapshot = config.clone();
             let _ = self.save_config(&snapshot).await;
         }
@@ -275,7 +283,7 @@ impl TelemetryService {
     ) -> Result<&'a mut TelemetryConfig> {
         if state.config.is_none() {
             let mut needs_write = false;
-            let config = match &self.config_path {
+            let mut config = match &self.config_path {
                 Some(path) if path.is_file() => match tokio::fs::read(path).await {
                     Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
                         needs_write = true;
@@ -292,6 +300,10 @@ impl TelemetryService {
                 }
                 None => TelemetryConfig::default(),
             };
+            if config.schema_version < TELEMETRY_SCHEMA_VERSION {
+                config.schema_version = TELEMETRY_SCHEMA_VERSION;
+                needs_write = true;
+            }
             if needs_write {
                 self.save_config(&config).await?;
             }
@@ -392,6 +404,49 @@ mod tests {
         assert!(recorded
             .iter()
             .all(|value| value["event"] == "daily_active"));
+    }
+
+    #[tokio::test]
+    async fn upgrading_on_the_same_day_sends_a_new_daily_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("telemetry.json");
+        let today = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let install_id = Uuid::new_v4();
+        tokio::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schemaVersion": 1,
+                "installId": install_id,
+                "analyticsEnabled": true,
+                "consentDecided": true,
+                "lastHeartbeatDate": today
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let (service, events) = TelemetryService::recording(path.clone());
+        service.daily_active_on(today).await;
+        service.daily_active_on(today).await;
+
+        {
+            let recorded = events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0]["event"], "daily_active");
+            assert_eq!(recorded[0]["appVersion"], CURRENT_APP_VERSION);
+        }
+
+        let config: TelemetryConfig =
+            serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
+        assert_eq!(config.schema_version, TELEMETRY_SCHEMA_VERSION);
+        assert_eq!(config.last_heartbeat_date, Some(today));
+        assert_eq!(
+            config.last_heartbeat_app_version.as_deref(),
+            Some(CURRENT_APP_VERSION)
+        );
     }
 
     #[tokio::test]

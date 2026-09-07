@@ -378,6 +378,7 @@ mod tests {
         );
         let value = serde_json::to_value(payload).unwrap();
         assert_eq!(value["event"], "generation_started");
+        assert_eq!(value["appVersion"], env!("CARGO_PKG_VERSION"));
         assert_eq!(value["properties"]["qualityPreset"], "balanced");
         assert_eq!(value["properties"]["inputType"], "video");
         assert_eq!(value.as_object().unwrap().len(), 7);
