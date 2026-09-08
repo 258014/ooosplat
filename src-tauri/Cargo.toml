@@ -13,6 +13,11 @@ default-run = "ooo-splat"
 name = "ooo_splat"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+default = []
+# Maintainer release CI injects the signed updater configuration before enabling this.
+updater = []
+
 [[bin]]
 name = "ooo-splat"
 path = "src/main.rs"
