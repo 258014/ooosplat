@@ -164,6 +164,21 @@ pub struct ProjectOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReshootProvenance {
+    pub source_project_id: Uuid,
+    pub source_project_path: PathBuf,
+    pub source_final_ply: PathBuf,
+    pub reshoot_source_path: PathBuf,
+    pub regions: Vec<GaussianCrop>,
+    pub guidance: Vec<String>,
+    #[serde(default)]
+    pub original_frame_count: u64,
+    #[serde(default)]
+    pub reshoot_frame_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectMetadata {
     #[serde(default = "schema_version")]
     pub schema_version: u32,
@@ -199,10 +214,12 @@ pub struct ProjectMetadata {
     pub transform: GaussianTransform,
     #[serde(default)]
     pub editing: GaussianEditing,
+    #[serde(default)]
+    pub reshoot: Option<ReshootProvenance>,
 }
 
 pub const fn schema_version() -> u32 {
-    5
+    6
 }
 
 fn default_model() -> String {
@@ -323,6 +340,7 @@ mod tests {
         assert_eq!(metadata.model, "final.ply");
         assert_eq!(metadata.transform, GaussianTransform::default());
         assert_eq!(metadata.editing, GaussianEditing::default());
+        assert!(metadata.reshoot.is_none());
         assert_eq!(metadata.input_type, ProjectInputType::Video);
         assert_eq!(metadata.schema_version, 2);
     }

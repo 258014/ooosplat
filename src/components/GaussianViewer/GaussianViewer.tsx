@@ -70,7 +70,7 @@ import {
   saveGaussianTransform,
 } from "../../lib/backend";
 import { previewAssetUrl as withPreviewAssetRevision } from "../../lib/previewAssetUrl";
-import { IDENTITY_TRANSFORM, useGaussianTransformStore } from "../../stores/gaussianTransformStore";
+import { cloneCrop, IDENTITY_TRANSFORM, useGaussianTransformStore } from "../../stores/gaussianTransformStore";
 import type {
   GaussianCrop,
   GaussianEditorTool,
@@ -840,10 +840,11 @@ const phaseLabels: Record<PreviewAnimationPhase, string> = {
   orbit: "环绕",
 };
 
-export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
+export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartReshoot }: {
   onExit: () => void | Promise<void>;
   onDisposed: (projectId: string) => void;
   pipelineRunning: boolean;
+  onStartReshoot: (projectId: string, regions: NonNullable<GaussianCrop>[], guidance: string[]) => void | Promise<void>;
 }) {
   const store = useGaussianTransformStore();
   const sceneApiRef = useRef<SplatSceneApi | null>(null);
@@ -880,6 +881,8 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
   const [navigationSaving, setNavigationSaving] = useState(false);
   const [cropFreezing, setCropFreezing] = useState(false);
   const [cropFreezeError, setCropFreezeError] = useState<string | null>(null);
+  const [reshootRegions, setReshootRegions] = useState<NonNullable<GaussianCrop>[]>([]);
+  const [reshootError, setReshootError] = useState<string | null>(null);
   const previewAssetUrl = useMemo(() => {
     if (!store.descriptor) return "";
     return withPreviewAssetRevision(store.descriptor.assetUrl, "retry", rendererRevision.toString());
@@ -1297,6 +1300,25 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
     error: "异常",
   }[viewport.phase];
   const videoBusy = !["idle", "completed", "error"].includes(videoPhase);
+  const addReshootRegion = () => {
+    const crop = store.editing.crop;
+    if (!crop) {
+      setReshootError("请先使用“球选择”或“盒选择”圈出模糊区域。");
+      return;
+    }
+    setReshootRegions((regions) => [...regions, cloneCrop(crop)!]);
+    setReshootError(null);
+  };
+  const reshootGuidance = reshootRegions.map((region, index) => region.kind === "sphere"
+    ? `区域 ${index + 1}：围绕圈选区域缓慢环拍，保持区域位于画面中央并覆盖至少两层视差。`
+    : `区域 ${index + 1}：从盒选区域正面、左右侧与上方各补拍一组高清画面，避免仅原地变焦。`);
+  const startReshoot = async () => {
+    if (!store.descriptor || reshootRegions.length === 0 || busy) {
+      setReshootError("请至少添加一个需要补拍的区域。");
+      return;
+    }
+    await onStartReshoot(store.descriptor.projectId, reshootRegions, reshootGuidance);
+  };
   const videoButtonLabel = videoPhase === "preparing"
     ? "准备导出"
     : videoPhase === "rendering"
@@ -1361,6 +1383,7 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
           {store.tool === "rectangle" && <button type="button" disabled={store.selectedCount === 0 || busy} onClick={store.deleteSelection}><Trash2 size={14} />删除选中</button>}
           <button type="button" title="恢复为原始 final.ply" disabled={busy || (store.history.length === 0 && store.editing.crop === null && store.editing.deletedCount === 0 && store.transform.scale === 1 && store.transform.position.every((value) => value === 0) && store.transform.rotation.every((value) => value === 0))} onClick={() => { store.resetAll(); setGaussianExportResult(null); }}><RotateCcw size={14} />全部撤销</button>
           <button type="button" disabled={busy || viewport.phase !== "ready"} onClick={() => void exportGaussian()}>{gaussianExporting ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />} {gaussianExporting ? `保存中 ${gaussianExportProgress.toFixed(0)}%` : "保存"}</button>
+          <button type="button" className="reshoot-action" disabled={busy || viewport.phase !== "ready"} onClick={() => void startReshoot()}><Film size={14} />高清补拍 {reshootRegions.length > 0 ? `(${reshootRegions.length})` : ""}</button>
         </> : <>
           <button type="button" disabled={videoBusy || viewport.phase !== "ready"} onClick={() => sceneApiRef.current?.replay()}><Play size={14} />重新播放</button>
           {videoBusy
@@ -1387,6 +1410,13 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
         {selectionDrag && <div className={`rectangle-selection-box mode-${selectionDrag.selectionMode}`} style={selectionRectStyle} aria-hidden="true" />}
         {mode === "adjust" && store.tool === "transform" && <TransformPanel transform={store.transform} onBegin={store.beginTransaction} onChange={store.setTransformLive} onCommit={store.commitTransaction} />}
         {mode === "adjust" && (store.tool === "sphere" || store.tool === "box") && <SelectionPanel crop={store.editing.crop} kind={store.tool} onBegin={store.beginCropTransaction} onChange={store.setCropLive} onCommit={store.commitCropTransaction} onEnable={() => { const tool = useGaussianTransformStore.getState().tool; if (tool === "sphere" || tool === "box") enableCrop(tool); }} />}
+        {mode === "adjust" && (store.tool === "sphere" || store.tool === "box") && <div className="reshoot-guide-panel">
+          <strong>高清补拍区域</strong>
+          <p>用当前{store.tool === "sphere" ? "球选" : "盒选"}圈住模糊或细节不足的位置，然后加入补拍清单。</p>
+          <button type="button" disabled={!store.editing.crop || busy} onClick={addReshootRegion}>加入当前区域</button>
+          {reshootRegions.length > 0 && <ol>{reshootGuidance.map((guide, index) => <li key={`${guide}-${index}`}>{guide}<button type="button" aria-label={`移除补拍区域 ${index + 1}`} onClick={() => setReshootRegions((regions) => regions.filter((_, item) => item !== index))}>移除</button></li>)}</ol>}
+          {reshootError && <p className="reshoot-guide-error">{reshootError}</p>}
+        </div>}
         {mode === "preview" && <div className="animation-hud">
           <span className={`animation-pulse phase-${animationStatus.phase}`} />
           <b>{phaseLabels[animationStatus.phase]}</b>

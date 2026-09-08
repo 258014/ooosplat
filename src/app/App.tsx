@@ -12,12 +12,12 @@ import {
   estimateProjectRuntime, getProjectOverview, onPipelineEvent, probeAndPlan, revealProject,
   selectImageSequence, selectProjectsRoot, selectVideo,
   setProjectsRoot, startPipeline, prepareGaussianPreview, releaseGaussianPreview,
-  initializeTelemetry, setTelemetryConsent, resumePipeline,
+  initializeTelemetry, setTelemetryConsent, resumePipeline, startReshootPipeline,
 } from "../lib/backend";
 import { startElapsedTicker } from "../lib/elapsedTimer";
 import { useAppStore } from "../stores/appStore";
 import { useGaussianTransformStore } from "../stores/gaussianTransformStore";
-import type { EngineStatus, InputType, ProjectStatus, ProjectSummary, Quality } from "../types/pipeline";
+import type { EngineStatus, GaussianCrop, InputType, ProjectStatus, ProjectSummary, Quality } from "../types/pipeline";
 import type { TelemetryPreferences as TelemetryPreferencesState } from "../types/telemetry";
 
 const GaussianViewer = lazy(() => import("../components/GaussianViewer").then((module) => ({ default: module.GaussianViewer })));
@@ -134,6 +134,8 @@ export function App() {
   const [privacySettingsOpen, setPrivacySettingsOpen] = useState(false);
   const [telemetryBusy, setTelemetryBusy] = useState(false);
   const [inputMenuOpen, setInputMenuOpen] = useState(false);
+  const [reshootInputMenuOpen, setReshootInputMenuOpen] = useState(false);
+  const [pendingReshoot, setPendingReshoot] = useState<{ sourceProjectId: string; regions: NonNullable<GaussianCrop>[]; guidance: string[] } | null>(null);
   const missingEngines = store.engines.filter((engine) => !engineReady(engine));
   const completed = useMemo(() => store.projects.filter((project) => project.status === "completed"), [store.projects]);
   const unfinished = useMemo(() => store.projects.filter((project) => project.status !== "completed"), [store.projects]);
@@ -404,6 +406,45 @@ export function App() {
     }
   };
 
+  const startReshoot = async (sourceProjectId: string, regions: NonNullable<GaussianCrop>[], guidance: string[]) => {
+    if (isRunning || !store.projectsRoot) return;
+    setPendingReshoot({ sourceProjectId, regions, guidance });
+    setReshootInputMenuOpen(true);
+  };
+
+  const chooseReshootInput = async (inputType: InputType) => {
+    const request = pendingReshoot;
+    setReshootInputMenuOpen(false);
+    setPendingReshoot(null);
+    if (!request || isRunning || !store.projectsRoot) return;
+    const reshootPath = inputType === "images" ? await selectImageSequence() : await selectVideo();
+    if (!reshootPath) return;
+    await exitPreview();
+    clearCancellationFeedback();
+    runElapsedOffset.current = 0;
+    runStartedAt.current = Date.now();
+    setLiveElapsedMs(0);
+    store.beginRun();
+    try {
+      const result = await startReshootPipeline({
+        sourceProjectId: request.sourceProjectId,
+        reshootPath,
+        quality: store.quality,
+        projectsRoot: store.projectsRoot,
+        regions: request.regions,
+        guidance: request.guidance,
+      });
+      store.setResult(result);
+      store.setPhase("completed");
+    } catch (error) {
+      const message = messageOf(error);
+      store.setError(message);
+      store.setPhase(message.includes("取消") ? "cancelled" : "failed");
+    } finally {
+      try { await refreshProjects(); } catch { /* derived project remains on disk */ }
+    }
+  };
+
   const exitPreview = async () => {
     const projectId = useGaussianTransformStore.getState().descriptor?.projectId;
     if (closingPreviewProjectId) return;
@@ -437,8 +478,19 @@ export function App() {
   if (viewMode === "preview") {
     return <main className="app-shell preview-mode">
       <Suspense fallback={<section className="preview-pane active preview-workspace"><div className="preview-empty"><LoaderCircle className="spin" size={24} /><strong>正在准备预览模块</strong></div></section>}>
-        <GaussianViewer onExit={exitPreview} onDisposed={previewRendererDisposed} pipelineRunning={isRunning} />
+        <GaussianViewer onExit={exitPreview} onDisposed={previewRendererDisposed} pipelineRunning={isRunning} onStartReshoot={startReshoot} />
       </Suspense>
+      {reshootInputMenuOpen && <div className="reshoot-input-backdrop" role="dialog" aria-modal="true" aria-labelledby="reshoot-input-title">
+        <section className="reshoot-input-dialog">
+          <h2 id="reshoot-input-title">导入高清补拍素材</h2>
+          <p>补拍素材会复制到新的派生项目，与原始输入画面融合后重新运行 COLMAP 和 Brush。原项目及其 final.ply 不会被覆盖。</p>
+          <div className="reshoot-input-options">
+            <button type="button" onClick={() => void chooseReshootInput("video")}><Clapperboard size={18} /><strong>选择补拍视频</strong><small>MP4 或 MOV</small></button>
+            <button type="button" onClick={() => void chooseReshootInput("images")}><Images size={18} /><strong>选择高清图片序列</strong><small>JPG、JPEG 或 PNG 文件夹</small></button>
+          </div>
+          <button type="button" className="reshoot-input-cancel" onClick={() => { setReshootInputMenuOpen(false); setPendingReshoot(null); }}>取消</button>
+        </section>
+      </div>}
     </main>;
   }
 
