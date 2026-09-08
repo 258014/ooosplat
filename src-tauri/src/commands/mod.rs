@@ -155,6 +155,17 @@ pub struct ProbeAndPlan {
     estimate: RuntimeEstimate,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReshootRequest {
+    source_project_id: String,
+    reshoot_path: String,
+    quality: Quality,
+    projects_root: String,
+    regions: Vec<GaussianCrop>,
+    guidance: Vec<String>,
+}
+
 fn paths_for_app(app: &tauri::AppHandle) -> EnginePaths {
     EnginePaths::discover(app.path().resource_dir().ok().as_deref())
 }
@@ -430,6 +441,58 @@ pub async fn resume_pipeline(
         ),
         Err(error) => telemetry_session.generation_failed(error),
     }
+    if let Err(error) = &result {
+        let stage = if matches!(error, SplatError::Cancelled) {
+            crate::pipeline::PipelineStage::Cancelled
+        } else {
+            crate::pipeline::PipelineStage::Failed
+        };
+        let mut event = crate::pipeline::PipelineEvent::mapped(stage, 1.0, error.to_string());
+        event.elapsed_ms = started.elapsed().as_millis() as u64;
+        let _ = app.emit("pipeline-event", event);
+    }
+    *state.active.lock().await = None;
+    result
+}
+
+#[tauri::command]
+pub async fn start_reshoot_pipeline(
+    app: tauri::AppHandle,
+    state: State<'_, PipelineController>,
+    request: ReshootRequest,
+) -> std::result::Result<PipelineResult, SplatError> {
+    let source_project_id = Uuid::parse_str(&request.source_project_id)
+        .map_err(|_| SplatError::Process("原项目 ID 无效".into()))?;
+    if request.regions.is_empty() {
+        return Err(SplatError::Process(
+            "请先在预览中圈选至少一个模糊区域".into(),
+        ));
+    }
+    for region in &request.regions {
+        region.validate()?;
+    }
+    let emitter = app.clone();
+    let started = Instant::now();
+    let runner = Arc::new(PipelineRunner::new(paths_for_app(&app), move |event| {
+        let _ = emitter.emit("pipeline-event", event);
+    }));
+    {
+        let mut active = state.active.lock().await;
+        if active.is_some() {
+            return Err(SplatError::Process("已有任务正在运行".into()));
+        }
+        *active = Some(runner.clone());
+    }
+    let result = runner
+        .generate_reshoot(
+            source_project_id,
+            Path::new(&request.reshoot_path),
+            request.quality,
+            Path::new(&request.projects_root),
+            request.regions,
+            request.guidance,
+        )
+        .await;
     if let Err(error) = &result {
         let stage = if matches!(error, SplatError::Cancelled) {
             crate::pipeline::PipelineStage::Cancelled
