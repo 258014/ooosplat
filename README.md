@@ -296,6 +296,28 @@ dist-artifacts\OOOSplat-0.4.0-x64-windows.exe
 
 首次构建前必须运行 `npm run setup:engines`。`beforeBuildCommand` 会自动执行引擎校验和前端生产构建，但不会在打包过程中隐式访问网络。
 
+### 应用内更新与发布
+
+Windows 版会在启动时从官方 GitHub Release 检查更新。发现新版本后，顶栏会显示“更新至 <版本号>”；点击后，应用会在页面内下载更新、显示进度，并在签名校验通过后启动更新安装程序和重启应用。用户无需到其他渠道重新下载安装包。
+
+更新清单固定为 `https://github.com/ooolabdev/ooosplat/releases/latest/download/latest.json`。每个更新包都由 Tauri updater 公钥验证；网络地址、Release 资产或 `latest.json` 被替换时，签名不匹配的包不会安装。
+
+签名认证必须由 `ooolabdev/ooosplat` 的仓库管理人独占。首次启用发布前，管理人在自己的安全环境中生成一对 Tauri signer 密钥，并仅在上游仓库的 GitHub Actions Secrets 配置：
+
+- `TAURI_SIGNING_PRIVATE_KEY`：Tauri signer 生成的私钥全文；不得提交、共享或上传到 Release。
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：只有生成私钥时设置了密码才需要。
+- `TAURI_UPDATER_PUBLIC_KEY`：与该私钥配对的 `.pub` 文件单行内容；它仅在 CI 构建时注入客户端配置，源码和 PR 中不保存具体公钥。
+
+密钥生成示例（只在仓库管理人的安全环境中执行一次）：
+
+```powershell
+npm run tauri -- signer generate --write-keys "$HOME\.tauri\ooosplat-updater.key"
+```
+
+发布时，将 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 的版本一致地更新为下一个 SemVer 版本，合入 `main` 后创建匹配的 tag，例如 `v0.3.1`。`.github/workflows/release.yml` 会将管理员配置的公钥临时注入构建、生成 NSIS 更新包、`.sig` 和 `latest.json`，并将三者上传至同一个 GitHub Release。tag 和版本不一致、未配置签名 Secret 或未产出签名时，工作流会失败而不是发布不可验证更新。
+
+> Windows 安装模式保持为整机安装（per-machine）。应用内更新会使用 NSIS passive 模式，必要时 Windows 仍会请求管理员权限。
+
 ## CLI
 
 仓库同时提供 `splatstudio` 诊断 CLI：
