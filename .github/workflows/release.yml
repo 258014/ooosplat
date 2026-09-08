@@ -1,0 +1,139 @@
+name: Publish signed Windows update
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Validate release tag and signing key
+        shell: pwsh
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY secret is required to publish a signed update." }
+          if (-not $env:TAURI_UPDATER_PUBLIC_KEY) { throw "TAURI_UPDATER_PUBLIC_KEY secret is required to build a client that verifies update signatures." }
+          $config = Get-Content -Raw 'src-tauri/tauri.conf.json' | ConvertFrom-Json
+          $config | Add-Member -NotePropertyName plugins -NotePropertyValue ([pscustomobject]@{
+            updater = [pscustomobject]@{
+              pubkey = $env:TAURI_UPDATER_PUBLIC_KEY
+              endpoints = @('https://github.com/ooolabdev/ooosplat/releases/latest/download/latest.json')
+              windows = [pscustomobject]@{ installMode = 'passive' }
+            }
+          })
+          $config | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 'src-tauri/tauri.conf.json'
+          $tag = "${{ inputs.tag || github.ref_name }}"
+          if ($tag -notmatch '^v\d+\.\d+\.\d+([-.+].+)?$') { throw "Release tags must use a semantic version, for example v0.3.1." }
+          $packageVersion = node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version"
+          $cargoVersion = (Select-String -Path 'src-tauri/Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $tauriVersion = (Get-Content -Raw 'src-tauri/tauri.conf.json' | ConvertFrom-Json).version
+          if ($tag.TrimStart('v') -ne $packageVersion) { throw "Tag $tag does not match package.json version $packageVersion." }
+          if ($packageVersion -ne $cargoVersion -or $packageVersion -ne $tauriVersion) { throw "Version mismatch: package.json=$packageVersion, Cargo.toml=$cargoVersion, tauri.conf.json=$tauriVersion." }
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify source
+        shell: pwsh
+        run: |
+          npm run verify:telemetry:release
+          npm test
+          npm run build
+          npm run verify:licenses:windows
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Install and verify bundled engines
+        shell: pwsh
+        run: |
+          npm run setup:engines:windows
+          npm run verify:engines:windows
+
+      - name: Build signed updater installer
+        run: npm run tauri -- build --bundles nsis
+
+      - name: Assemble signed update feed
+        id: update
+        shell: pwsh
+        run: |
+          $version = node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version"
+          $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer was not generated.' }
+          $signature = "$($installer.FullName).sig"
+          if (-not (Test-Path $signature)) { throw 'Updater signature was not generated.' }
+
+          $assetName = "OOOSplat-$version-x64-setup.exe"
+          New-Item -ItemType Directory -Force -Path dist-artifacts | Out-Null
+          Copy-Item $installer.FullName "dist-artifacts/$assetName"
+          Copy-Item $signature "dist-artifacts/$assetName.sig"
+          $publishedAt = (Get-Date).ToUniversalTime().ToString('o')
+          $releaseUrl = "https://github.com/ooolabdev/ooosplat/releases/download/v$version/$assetName"
+          @{
+            version = $version
+            notes = "OOOSplat $version"
+            pub_date = $publishedAt
+            platforms = @{
+              'windows-x86_64' = @{
+                signature = (Get-Content -Raw "dist-artifacts/$assetName.sig").Trim()
+                url = $releaseUrl
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 'dist-artifacts/latest.json'
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "asset_name=$assetName" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub Release and update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: pwsh
+        run: |
+          $assets = @(
+            'dist-artifacts/latest.json',
+            "dist-artifacts/${{ steps.update.outputs.asset_name }}",
+            "dist-artifacts/${{ steps.update.outputs.asset_name }}.sig"
+          )
+          gh release view $env:TAG 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG $assets --clobber
+          } else {
+            gh release create $env:TAG $assets --title "OOOSplat ${{ steps.update.outputs.version }}" --generate-notes
+          }

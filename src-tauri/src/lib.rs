@@ -13,6 +13,7 @@ pub fn run_app() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(commands::PipelineController::default())
         .manage(commands::PreviewController::default())
         .manage(telemetry::TelemetryService::new())
