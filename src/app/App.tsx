@@ -1,8 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
-  Blend, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Cpu, FileBox, Images,
-  Download, Eye, FolderOpen, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Square, Trash2,
-  Languages, Settings2, X, Zap,
+  ArrowDownToLine, Blend, ChevronDown, ChevronRight, CircleAlert, CircleCheck, Clapperboard, Cpu, Download, Eye,
+  FileBox, FolderOpen, Images, Languages, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Settings2, Square,
+  Trash2, X, Zap,
 } from "lucide-react";
 import appLogo from "../../assets/app-icon.svg";
 import packageMetadata from "../../package.json";
@@ -16,6 +16,8 @@ import {
 } from "../lib/backend";
 import { startElapsedTicker } from "../lib/elapsedTimer";
 import { pipelineCommandError, pipelineErrorMessage, pipelineWasCancelled, type PipelineFailureKind } from "../lib/pipelineError";
+import { checkForAppUpdate, downloadAndInstallAppUpdate, type UpdateDownloadProgress } from "../lib/updater";
+import type { Update } from "@tauri-apps/plugin-updater";
 import { localizePipelineMessage, useI18n, type TranslationKey } from "../i18n";
 import { useAppStore } from "../stores/appStore";
 import { useGaussianTransformStore } from "../stores/gaussianTransformStore";
@@ -238,6 +240,10 @@ export function App() {
   const [privacySettingsOpen, setPrivacySettingsOpen] = useState(false);
   const [telemetryBusy, setTelemetryBusy] = useState(false);
   const [inputMenuOpen, setInputMenuOpen] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<"checking" | "idle" | "ready" | "downloading" | "error">("checking");
+  const [updateProgress, setUpdateProgress] = useState<UpdateDownloadProgress | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const missingEngines = store.engines.filter((engine) => !engineReady(engine));
   const completed = useMemo(() => store.projects.filter((project) => project.status === "completed"), [store.projects]);
   const unfinished = useMemo(() => store.projects.filter((project) => project.status !== "completed"), [store.projects]);
@@ -328,6 +334,34 @@ export function App() {
       .then(setTelemetryPreferences)
       .catch(() => undefined);
   }, []);
+
+  const checkForUpdate = useCallback(async () => {
+    setUpdateStatus("checking");
+    setUpdateError(null);
+    try {
+      const update = await checkForAppUpdate();
+      setAvailableUpdate(update);
+      setUpdateStatus(update ? "ready" : "idle");
+    } catch (error) {
+      setAvailableUpdate(null);
+      setUpdateStatus("error");
+      setUpdateError(messageOf(error));
+    }
+  }, []);
+
+  useEffect(() => { void checkForUpdate(); }, [checkForUpdate]);
+
+  const installUpdate = async () => {
+    if (!availableUpdate || updateStatus === "downloading") return;
+    setUpdateStatus("downloading");
+    setUpdateError(null);
+    try {
+      await downloadAndInstallAppUpdate(availableUpdate, setUpdateProgress);
+    } catch (error) {
+      setUpdateStatus("error");
+      setUpdateError(messageOf(error));
+    }
+  };
 
   useEffect(() => {
     let unlisten: undefined | (() => void);
@@ -739,6 +773,11 @@ export function App() {
     <header className="topbar">
       <div className="brand-lockup"><span className="brand-mark"><img src={appLogo} alt="" aria-hidden="true" /></span><span className="brand-name">OOO<span>Splat</span></span><span className="version-tag">LOCAL / {packageMetadata.version}</span></div>
       <div className="topbar-actions">
+        {updateStatus === "ready" && availableUpdate && <button className="update-action" type="button" onClick={() => void installUpdate()}><ArrowDownToLine size={15} />{t("update.install", { version: availableUpdate.version })}</button>}
+        {updateStatus === "downloading" && <span className="update-progress" aria-live="polite"><LoaderCircle className="spin" size={14} />{updateProgress?.totalBytes ? t("update.downloadingProgress", { percent: Math.min(100, Math.round((updateProgress.downloadedBytes / updateProgress.totalBytes) * 100)) }) : t("update.downloading")}</span>}
+        {updateStatus === "idle" && <button className="settings-action update-check-action" type="button" onClick={() => void checkForUpdate()}><CircleCheck size={15} />{t("update.upToDate")}</button>}
+        {updateStatus === "checking" && <span className="update-progress"><LoaderCircle className="spin" size={14} />{t("update.checking")}</span>}
+        {updateStatus === "error" && <button className="settings-action update-check-action" type="button" title={updateError ?? undefined} onClick={() => void checkForUpdate()}><CircleAlert size={15} />{t("update.checkFailed")}</button>}
         <button className="settings-action language-action" type="button" title={t("language.switchTo")} aria-label={t("language.switchTo")} onClick={toggleLocale}><Languages size={15} />{t("language.target")}</button>
         {telemetryPreferences && <button className="settings-action" type="button" onClick={() => setPrivacySettingsOpen(true)}><Settings2 size={15} />{t("top.settings")}</button>}
         <div className="engine-summary"><span className={missingEngines.length ? "status-light warning" : "status-light"} />{store.engines.length === 0 ? t("top.checkingEngines") : missingEngines.length ? t("top.engineIssues", { count: missingEngines.length }) : t("top.enginesReady")}</div>
