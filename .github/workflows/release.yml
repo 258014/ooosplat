@@ -52,6 +52,7 @@ jobs:
               windows = [pscustomobject]@{ installMode = 'passive' }
             }
           })
+          $config.bundle.createUpdaterArtifacts = $true
           $config | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 'src-tauri/tauri.conf.json'
           $tag = "${{ inputs.tag || github.ref_name }}"
           if ($tag -notmatch '^v\d+\.\d+\.\d+([-.+].+)?$') { throw "Release tags must use a semantic version, for example v0.3.1." }
@@ -88,7 +89,7 @@ jobs:
           npm run verify:engines:windows
 
       - name: Build signed updater installer
-        run: npm run tauri -- build --bundles nsis
+        run: npm run tauri -- build --bundles nsis --features updater
 
       - name: Assemble signed update feed
         id: update
