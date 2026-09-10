@@ -1404,7 +1404,7 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
         marker: {
           x: projected.x,
           y: projected.y,
-          radius: guideMarkerRadius(crop, pixelsPerUnit, Math.min(frame.width, frame.height)),
+          radius: guideMarkerRadius(crop, pixelsPerUnit),
         },
         region: crop,
         index,
