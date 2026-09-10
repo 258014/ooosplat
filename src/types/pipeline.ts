@@ -110,6 +110,10 @@ export interface ProjectSummary {
 export interface ProjectOverview { projectsRoot: string; projects: ProjectSummary[]; }
 
 export type GaussianFormat = "ply" | "sog" | "spz";
+export interface SparsePreview {
+  points: [number, number, number, number, number, number][];
+  cameras: [number, number, number][];
+}
 export interface GaussianTransform {
   position: [number, number, number];
   rotation: [number, number, number];

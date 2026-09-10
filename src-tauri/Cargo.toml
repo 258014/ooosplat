@@ -13,6 +13,12 @@ default-run = "ooo-splat"
 name = "ooo_splat"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+default = []
+# Only maintainer release builds have the signed feed configuration required by
+# tauri-plugin-updater. Local/offline installs must start without that plugin.
+updater = []
+
 [[bin]]
 name = "ooo-splat"
 path = "src/main.rs"

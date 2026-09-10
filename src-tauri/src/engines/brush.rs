@@ -31,6 +31,10 @@ pub async fn train(
     if candidate.exists() {
         tokio::fs::remove_file(&candidate).await?;
     }
+    // Export intermediate snapshots during training so the app can offer a live
+    // preview of the splats as they refine (the final export still happens when
+    // the trainer reaches the requested step count).
+    let export_every = ((preset.brush_iterations as u64) / 10).clamp(500, 2_000);
     let output = manager
         .run(ProcessSpec {
             executable: executable.to_path_buf(),
@@ -40,7 +44,7 @@ pub async fn train(
                 OsString::from("--max-resolution"),
                 preset.brush_max_resolution.to_string().into(),
                 OsString::from("--export-every"),
-                preset.brush_iterations.to_string().into(),
+                export_every.to_string().into(),
                 OsString::from("--export-path"),
                 output_directory.into(),
                 OsString::from("--export-name"),
