@@ -214,10 +214,6 @@ What is sent:
 
 What is never sent: any source media, including videos, images, and PLY files; file names, paths, and project names; logs and command output; user names or any personal information.
 
-Statistics are sent to `https://www.ooolab.cn/api/telemetry/event`. This is the application's only outbound network request; frame extraction, reconstruction, and training all run locally.
-
-The preference and the install ID are stored in `%LOCALAPPDATA%\SplatStudio\telemetry.json`. Deleting that file generates a new random install ID on the next launch.
-
 ## Bundled Engines
 
 | Engine | Pinned version/build | Purpose |
