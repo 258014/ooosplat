@@ -148,17 +148,10 @@ interface SplatSceneApi {
   freezeCrop: (crop: Exclude<GaussianCrop, null>, deletedMask: Uint8Array) => Promise<Uint8Array>;
   alignView: (view: GaussianOrthographicView) => void;
   initializeCrop: (kind: "sphere" | "box", previous: GaussianCrop) => Exclude<GaussianCrop, null> | null;
-  /** Current view framed on the object, with the region projected inside it. */
-  captureReshootFrame: (subject: {
-    center: [number, number, number];
-    edge: [number, number, number];
-  }) => Promise<{
-    width: number;
-    height: number;
-    rgba: Uint8ClampedArray;
-    center: { x: number; y: number; visible: boolean } | null;
-    edge: { x: number; y: number; visible: boolean } | null;
-  } | null>;
+  /** Current view as top-down RGBA pixels, used to draw a reshoot guide. */
+  captureReshootFrame: () => Promise<{ width: number; height: number; rgba: Uint8ClampedArray } | null>;
+  /** Model-space point to image pixels, so the guide can circle the region. */
+  projectToScreen: (point: [number, number, number]) => { x: number; y: number; width: number; height: number; visible: boolean } | null;
   exportVideo: (options: {
     signal: AbortSignal;
     onProgress: (progress: GaussianVideoEncodingProgress) => void;
@@ -822,64 +815,45 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
   }, [transformedModelBounds]);
 
   /**
-   * Captures the current view for a reshoot guide. The camera is framed on the
-   * object first, so the photo is always centred on it, and the region is
-   * projected inside that same camera state.
+   * Captures the current view for a reshoot guide, and projects a model-space
+   * point to image pixels so the guide can circle the selected region.
    */
-  const captureReshootFrame = useCallback(async (subject: {
-    center: [number, number, number];
-    edge: [number, number, number];
-  }) => {
+  const captureReshootFrame = useCallback(async () => {
     if (appDestroyedRef.current || contextLostRef.current) return null;
-    const controls = controlsRef.current;
-    const cameraEntity = cameraRef.current;
-    if (!controls || !cameraEntity?.camera) return null;
     const device = app.graphicsDevice as WebglGraphicsDevice;
     const width = device.width;
     const height = device.height;
     if (!width || !height) return null;
+    app.render();
+    const pixels = new Uint8Array(width * height * 4);
+    device.setRenderTarget(null);
+    device.updateBegin();
+    await device.readPixelsAsync(0, 0, width, height, pixels, true);
+    if (appDestroyedRef.current) return null;
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    copyFlippedRgbaRows(pixels, rgba, width, height);
+    return { width, height, rgba };
+  }, [app]);
 
-    const bounds = transformedModelBounds();
-    const previous = controls.snapshot();
-    const project = (point: [number, number, number]) => {
-      const matrix = new Mat4().mul2(cameraEntity.camera!.projectionMatrix, cameraEntity.camera!.viewMatrix);
-      const world = splatRef.current
-        ? splatRef.current.getWorldTransform().transformPoint(new Vec3(point[0], point[1], point[2]))
-        : new Vec3(point[0], point[1], point[2]);
-      const clip = matrix.transformPoint(world);
-      if (!Number.isFinite(clip.x) || !Number.isFinite(clip.y)) return null;
-      return {
-        x: (clip.x * 0.5 + 0.5) * width,
-        y: (1 - (clip.y * 0.5 + 0.5)) * height,
-        visible: clip.z >= 0 && clip.z <= 1,
-      };
+  const projectToScreen = useCallback((point: [number, number, number]) => {
+    const cameraEntity = cameraRef.current;
+    const splatEntity = splatRef.current;
+    if (!cameraEntity?.camera || !splatEntity) return null;
+    const device = app.graphicsDevice;
+    const matrix = new Mat4().mul2(cameraEntity.camera.projectionMatrix, cameraEntity.camera.viewMatrix);
+    const world = splatEntity.getWorldTransform().transformPoint(new Vec3(point[0], point[1], point[2]));
+    const clip = matrix.transformPoint(world);
+    if (!Number.isFinite(clip.x) || !Number.isFinite(clip.y)) return null;
+    return {
+      x: (clip.x * 0.5 + 0.5) * device.width,
+      y: (1 - (clip.y * 0.5 + 0.5)) * device.height,
+      width: device.width,
+      height: device.height,
+      visible: clip.z >= 0 && clip.z <= 1,
     };
+  }, [app]);
 
-    try {
-      if (bounds) {
-        // Keep the viewing direction but centre and size the object in frame.
-        controls.fit(bounds, { occupancy: 0.82, rightInsetPx: 0 });
-        app.renderNextFrame = true;
-        await waitForSplatFrame(app, cameraEntity.camera, new AbortController().signal);
-        app.render();
-      }
-      const center = project(subject.center);
-      const edge = project(subject.edge);
-      const pixels = new Uint8Array(width * height * 4);
-      device.setRenderTarget(null);
-      device.updateBegin();
-      await device.readPixelsAsync(0, 0, width, height, pixels, true);
-      if (appDestroyedRef.current) return null;
-      const rgba = new Uint8ClampedArray(width * height * 4);
-      copyFlippedRgbaRows(pixels, rgba, width, height);
-      return { width, height, rgba, center, edge };
-    } finally {
-      controls.restore(previous);
-      app.renderNextFrame = true;
-    }
-  }, [app, transformedModelBounds]);
-
-  useImperativeHandle(ref, () => ({ replay, exportVideo, selectRectangle, freezeCrop, alignView, initializeCrop, captureReshootFrame }), [alignView, captureReshootFrame, exportVideo, freezeCrop, initializeCrop, replay, selectRectangle]);
+  useImperativeHandle(ref, () => ({ replay, exportVideo, selectRectangle, freezeCrop, alignView, initializeCrop, captureReshootFrame, projectToScreen }), [alignView, captureReshootFrame, exportVideo, freezeCrop, initializeCrop, projectToScreen, replay, selectRectangle]);
 
   return <>
     <PreviewCamera ref={cameraRef} />
@@ -1416,21 +1390,21 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
     setReshootError(null);
     setGuidePending(index);
     try {
+      const projected = sceneApiRef.current?.projectToScreen(crop.center);
+      const frame = await sceneApiRef.current?.captureReshootFrame();
+      if (!projected || !frame) throw new Error("无法获取当前视角的画面。");
       // Screen pixels per model unit, so the highlight matches the selection size.
       const edgePoint: [number, number, number] = crop.kind === "sphere"
         ? [crop.center[0] + crop.radius, crop.center[1], crop.center[2]]
         : [crop.center[0] + crop.size[0] / 2, crop.center[1], crop.center[2]];
-      const capture = await sceneApiRef.current?.captureReshootFrame({ center: crop.center, edge: edgePoint });
-      if (!capture?.center) throw new Error("无法获取当前视角的画面。");
-      const pixelsPerUnit = capture.edge
-        ? Math.hypot(capture.edge.x - capture.center.x, capture.edge.y - capture.center.y) || 1
-        : 1;
+      const edge = sceneApiRef.current?.projectToScreen(edgePoint);
+      const pixelsPerUnit = edge ? Math.hypot(edge.x - projected.x, edge.y - projected.y) || 1 : 1;
       const guideImage = composeReshootGuideImage({
-        frame: { width: capture.width, height: capture.height, rgba: capture.rgba },
+        frame,
         marker: {
-          x: capture.center.x,
-          y: capture.center.y,
-          radius: guideMarkerRadius(crop, pixelsPerUnit, Math.min(capture.width, capture.height)),
+          x: projected.x,
+          y: projected.y,
+          radius: guideMarkerRadius(crop, pixelsPerUnit, Math.min(frame.width, frame.height)),
         },
         region: crop,
         index,
