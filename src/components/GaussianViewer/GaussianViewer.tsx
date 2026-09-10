@@ -840,11 +840,13 @@ const phaseLabels: Record<PreviewAnimationPhase, string> = {
   orbit: "环绕",
 };
 
-export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartReshoot }: {
+export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartReshoot, reshootEntry = false }: {
   onExit: () => void | Promise<void>;
   onDisposed: (projectId: string) => void;
   pipelineRunning: boolean;
   onStartReshoot: (projectId: string, regions: NonNullable<GaussianCrop>[], guidance: string[]) => void | Promise<void>;
+  /** Opened from the project list's reshoot entry: land on the reshoot workflow. */
+  reshootEntry?: boolean;
 }) {
   const store = useGaussianTransformStore();
   const sceneApiRef = useRef<SplatSceneApi | null>(null);
@@ -1245,6 +1247,17 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
     setOrthographicView(view);
     sceneApiRef.current?.alignView(view);
   };
+
+  // The reshoot panel only exists while a sphere or box tool is active, so the
+  // list entry activates one instead of leaving the user on an empty adjust view.
+  const reshootEntryApplied = useRef(false);
+  useEffect(() => {
+    if (!reshootEntry || reshootEntryApplied.current) return;
+    reshootEntryApplied.current = true;
+    setMode("adjust");
+    const current = useGaussianTransformStore.getState();
+    if (current.tool !== "sphere" && current.tool !== "box") void switchTool("sphere");
+  }, [reshootEntry, switchTool]);
 
   const rectanglePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (mode !== "adjust" || store.tool !== "rectangle" || event.button !== 0 || busy || viewport.phase !== "ready") return;

@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
-  Blend, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Cpu, FileBox, Images,
+  Blend, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Cpu, FileBox, Film, Images,
   Eye, FolderOpen, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Square, Trash2,
   Settings2, Zap,
 } from "lucide-react";
@@ -78,7 +78,7 @@ function engineReady(engine: EngineStatus) {
   return engine.canStart;
 }
 
-function ProjectRow({ project, busy, previewing, previewDisabled, onPreview, onResume, onDelete }: { project: ProjectSummary; busy: boolean; previewing: boolean; previewDisabled: boolean; onPreview: (project: ProjectSummary) => void; onResume: (project: ProjectSummary) => void; onDelete: (project: ProjectSummary) => void }) {
+function ProjectRow({ project, busy, previewing, previewDisabled, onPreview, onReshoot, onResume, onDelete }: { project: ProjectSummary; busy: boolean; previewing: boolean; previewDisabled: boolean; onPreview: (project: ProjectSummary) => void; onReshoot: (project: ProjectSummary) => void; onResume: (project: ProjectSummary) => void; onDelete: (project: ProjectSummary) => void }) {
   return <article className="project-row">
     <div className="project-row-main">
       <div className="project-title-line">
@@ -97,6 +97,7 @@ function ProjectRow({ project, busy, previewing, previewDisabled, onPreview, onR
     </dl>
     <div className="project-actions">
       {project.status === "completed" && <button className="preview-link" type="button" disabled={previewDisabled} onClick={() => onPreview(project)}>{previewing ? <LoaderCircle className="spin" size={14} /> : <Eye size={14} />}{previewing ? "正在打开" : "预览"}</button>}
+      {project.status === "completed" && <button className="reshoot-link" type="button" disabled={busy || previewDisabled} onClick={() => onReshoot(project)}><Film size={14} />高清补拍</button>}
       {project.status !== "completed" && <button className="resume-link" type="button" disabled={busy} onClick={() => onResume(project)}><Play size={14} fill="currentColor" />继续任务</button>}
       <button type="button" onClick={() => void revealProject(project)}><MapPin size={14} />在文件管理器中显示</button>
       <button className="danger-link" type="button" disabled={busy} onClick={() => onDelete(project)}><Trash2 size={14} />删除</button>
@@ -136,6 +137,7 @@ export function App() {
   const [inputMenuOpen, setInputMenuOpen] = useState(false);
   const [reshootInputMenuOpen, setReshootInputMenuOpen] = useState(false);
   const [pendingReshoot, setPendingReshoot] = useState<{ sourceProjectId: string; regions: NonNullable<GaussianCrop>[]; guidance: string[] } | null>(null);
+  const [reshootEntry, setReshootEntry] = useState(false);
   const missingEngines = store.engines.filter((engine) => !engineReady(engine));
   const completed = useMemo(() => store.projects.filter((project) => project.status === "completed"), [store.projects]);
   const unfinished = useMemo(() => store.projects.filter((project) => project.status !== "completed"), [store.projects]);
@@ -382,10 +384,11 @@ export function App() {
     return release;
   }, []);
 
-  const previewProject = async (project: ProjectSummary) => {
+  const previewProject = async (project: ProjectSummary, options?: { reshoot?: boolean }) => {
     if (project.status !== "completed" || openingPreviewProjectId || closingPreviewProjectId) return;
     const previous = useGaussianTransformStore.getState().descriptor?.projectId;
     setOpeningPreviewProjectId(project.id);
+    setReshootEntry(Boolean(options?.reshoot));
     setDisposedPreviewProjectId(null);
     store.setError(null);
     try {
@@ -449,6 +452,7 @@ export function App() {
     const projectId = useGaussianTransformStore.getState().descriptor?.projectId;
     if (closingPreviewProjectId) return;
     if (projectId) setClosingPreviewProjectId(projectId);
+    setReshootEntry(false);
     setViewMode("tasks");
   };
 
@@ -478,7 +482,7 @@ export function App() {
   if (viewMode === "preview") {
     return <main className="app-shell preview-mode">
       <Suspense fallback={<section className="preview-pane active preview-workspace"><div className="preview-empty"><LoaderCircle className="spin" size={24} /><strong>正在准备预览模块</strong></div></section>}>
-        <GaussianViewer onExit={exitPreview} onDisposed={previewRendererDisposed} pipelineRunning={isRunning} onStartReshoot={startReshoot} />
+        <GaussianViewer onExit={exitPreview} onDisposed={previewRendererDisposed} pipelineRunning={isRunning} onStartReshoot={startReshoot} reshootEntry={reshootEntry} />
       </Suspense>
       {reshootInputMenuOpen && <div className="reshoot-input-backdrop" role="dialog" aria-modal="true" aria-labelledby="reshoot-input-title">
         <section className="reshoot-input-dialog">
@@ -631,8 +635,8 @@ export function App() {
 
         {completed.length === 0 && unfinished.length === 0 && <div className="empty-state"><FileBox size={30} strokeWidth={1.4} /><strong>还没有生成项目</strong><p>选择视频和项目目录后开始生成，成果会自动出现在这里。</p></div>}
 
-        {completed.length > 0 && <div className="project-group"><div className="group-heading"><span>已完成</span><small>{completed.length} 个项目</small></div>{completed.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={openingPreviewProjectId === project.id} previewDisabled={openingPreviewProjectId !== null || closingPreviewProjectId !== null} onPreview={(item) => void previewProject(item)} onResume={() => undefined} onDelete={(item) => void removeProject(item)} />)}</div>}
-        {unfinished.length > 0 && <div className="project-group unfinished"><div className="group-heading"><span>未完成</span><small>{unfinished.length} 个项目</small></div>{unfinished.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={false} previewDisabled onPreview={() => undefined} onResume={(item) => void resume(item)} onDelete={(item) => void removeProject(item)} />)}</div>}
+        {completed.length > 0 && <div className="project-group"><div className="group-heading"><span>已完成</span><small>{completed.length} 个项目</small></div>{completed.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={openingPreviewProjectId === project.id} previewDisabled={openingPreviewProjectId !== null || closingPreviewProjectId !== null} onPreview={(item) => void previewProject(item)} onReshoot={(item) => void previewProject(item, { reshoot: true })} onResume={() => undefined} onDelete={(item) => void removeProject(item)} />)}</div>}
+        {unfinished.length > 0 && <div className="project-group unfinished"><div className="group-heading"><span>未完成</span><small>{unfinished.length} 个项目</small></div>{unfinished.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={false} previewDisabled onPreview={() => undefined} onReshoot={() => undefined} onResume={(item) => void resume(item)} onDelete={(item) => void removeProject(item)} />)}</div>}
       </section>
     </section>
     </div>

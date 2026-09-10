@@ -264,6 +264,7 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .project-actions button:hover:not(:disabled) { color: var(--blue); }
 .project-actions .preview-link { color: var(--blue); font-weight: 700; }
 .project-actions .resume-link { color: var(--blue); font-weight: 700; }
+.project-actions .reshoot-link { color: #7a5af8; font-weight: 700; }
 .project-actions .danger-link:hover:not(:disabled) { color: var(--red); }
 
 .preview-mode { background: #e7ebf1; }
