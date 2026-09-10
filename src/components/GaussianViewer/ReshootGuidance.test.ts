@@ -1,17 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  clampGuideZoom,
   findReshootRegion,
   GUIDE_ARROW_MARGIN,
   GUIDE_IMAGE_SIZE,
-  GUIDE_ZOOM_MAX,
-  GUIDE_ZOOM_MIN,
   guideCaption,
   guideMarkerInViewport,
   guideMarkerRadius,
   guideViewport,
   guideViewportPoint,
-  guideZoomLabel,
   isSameReshootRegion,
   regionGeometryLabel,
   regionKey,
@@ -19,9 +15,6 @@ import {
   reshootGuidance,
   reshootRegionsGuidance,
   shootingDirections,
-  zoomFromWheel,
-  zoomInGuide,
-  zoomOutGuide,
   type ReshootRegion,
 } from "./ReshootGuidance";
 
@@ -182,34 +175,5 @@ describe("reshoot guide crop", () => {
       expect(arrow.fromY).toBeGreaterThanOrEqual(0);
       expect(arrow.fromY).toBeLessThanOrEqual(GUIDE_IMAGE_SIZE);
     }
-  });
-});
-
-describe("guide zoom", () => {
-  it("zooms continuously and never leaves the allowed range", () => {
-    expect(clampGuideZoom(2.345)).toBe(2.35);
-    expect(clampGuideZoom(0.2)).toBe(GUIDE_ZOOM_MIN);
-    expect(clampGuideZoom(99)).toBe(GUIDE_ZOOM_MAX);
-    expect(clampGuideZoom(Number.NaN)).toBe(GUIDE_ZOOM_MIN);
-  });
-
-  it("steps in and out by a fixed ratio", () => {
-    expect(zoomInGuide(1)).toBe(1.25);
-    expect(zoomOutGuide(2)).toBe(1.6);
-    expect(zoomOutGuide(1)).toBe(1);
-    expect(zoomInGuide(GUIDE_ZOOM_MAX)).toBe(GUIDE_ZOOM_MAX);
-  });
-
-  it("maps wheel gestures exponentially in both directions", () => {
-    expect(zoomFromWheel(2, -100)).toBeGreaterThan(2);
-    expect(zoomFromWheel(2, 100)).toBeLessThan(2);
-    expect(zoomFromWheel(1, 100)).toBe(GUIDE_ZOOM_MIN);
-    expect(zoomFromWheel(1, -1_000_000)).toBe(GUIDE_ZOOM_MAX);
-    expect(zoomFromWheel(4, -100) / 4).toBeCloseTo(zoomFromWheel(2, -100) / 2, 1);
-  });
-
-  it("labels the current zoom as a percentage", () => {
-    expect(guideZoomLabel(1)).toBe("100%");
-    expect(guideZoomLabel(2.5)).toBe("250%");
   });
 });

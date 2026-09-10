@@ -202,34 +202,6 @@ export function guideMarkerInViewport(
   return { x: clamp(mapped.x), y: clamp(mapped.y), radius };
 }
 
-/** Guide pictures are shown at their natural size at 100%. */
-export const GUIDE_ZOOM_MIN = 1;
-export const GUIDE_ZOOM_MAX = 8;
-const GUIDE_ZOOM_STEP = 1.25;
-
-/** Continuous zoom, so a wheel gesture or slider never jumps between fixed steps. */
-export function clampGuideZoom(value: number): number {
-  if (Number.isNaN(value)) return GUIDE_ZOOM_MIN;
-  return Math.round(Math.min(GUIDE_ZOOM_MAX, Math.max(GUIDE_ZOOM_MIN, value)) * 100) / 100;
-}
-
-export function zoomInGuide(current: number): number {
-  return clampGuideZoom(current * GUIDE_ZOOM_STEP);
-}
-
-export function zoomOutGuide(current: number): number {
-  return clampGuideZoom(current / GUIDE_ZOOM_STEP);
-}
-
-/** Wheel deltas map exponentially, so zooming feels even at every scale. */
-export function zoomFromWheel(current: number, deltaY: number): number {
-  return clampGuideZoom(current * Math.exp(-deltaY * 0.0015));
-}
-
-export function guideZoomLabel(zoom: number): string {
-  return `${Math.round(zoom * 100)}%`;
-}
-
 export function guideCaption(region: ReshootRegion, index: number): string {
   return `区域 ${index + 1} · ${region.kind === "sphere" ? "球选" : "盒选"} · 箭头 = 补拍机位（箭头指向被补拍区域）`;
 }
