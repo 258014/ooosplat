@@ -136,7 +136,7 @@ export function App() {
   const [telemetryBusy, setTelemetryBusy] = useState(false);
   const [inputMenuOpen, setInputMenuOpen] = useState(false);
   const [reshootInputMenuOpen, setReshootInputMenuOpen] = useState(false);
-  const [pendingReshoot, setPendingReshoot] = useState<{ sourceProjectId: string; regions: NonNullable<GaussianCrop>[]; guidance: string[] } | null>(null);
+  const [pendingReshoot, setPendingReshoot] = useState<{ sourceProjectId: string; regions: NonNullable<GaussianCrop>[]; guidance: string[]; guideImages: Array<string | null> } | null>(null);
   const [reshootEntry, setReshootEntry] = useState(false);
   const missingEngines = store.engines.filter((engine) => !engineReady(engine));
   const completed = useMemo(() => store.projects.filter((project) => project.status === "completed"), [store.projects]);
@@ -409,9 +409,14 @@ export function App() {
     }
   };
 
-  const startReshoot = async (sourceProjectId: string, regions: NonNullable<GaussianCrop>[], guidance: string[]) => {
+  const startReshoot = async (
+    sourceProjectId: string,
+    regions: NonNullable<GaussianCrop>[],
+    guidance: string[],
+    guideImages: Array<string | null>,
+  ) => {
     if (isRunning || !store.projectsRoot) return;
-    setPendingReshoot({ sourceProjectId, regions, guidance });
+    setPendingReshoot({ sourceProjectId, regions, guidance, guideImages });
     setReshootInputMenuOpen(true);
   };
 
@@ -436,6 +441,7 @@ export function App() {
         projectsRoot: store.projectsRoot,
         regions: request.regions,
         guidance: request.guidance,
+        guideImages: request.guideImages,
       });
       store.setResult(result);
       store.setPhase("completed");

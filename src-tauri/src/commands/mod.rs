@@ -164,6 +164,9 @@ pub struct ReshootRequest {
     projects_root: String,
     regions: Vec<GaussianCrop>,
     guidance: Vec<String>,
+    /// PNG data URLs with the circled region and its shooting directions.
+    #[serde(default)]
+    guidance_images: Vec<String>,
 }
 
 fn paths_for_app(app: &tauri::AppHandle) -> EnginePaths {
@@ -471,6 +474,13 @@ pub async fn start_reshoot_pipeline(
     for region in &request.regions {
         region.validate()?;
     }
+    if request.guidance.len() != request.regions.len()
+        || request.guidance_images.len() != request.regions.len()
+    {
+        return Err(SplatError::Process(
+            "补拍区域与补拍指引数量不一致，请重新圈选区域".into(),
+        ));
+    }
     let emitter = app.clone();
     let started = Instant::now();
     let runner = Arc::new(PipelineRunner::new(paths_for_app(&app), move |event| {
@@ -489,8 +499,11 @@ pub async fn start_reshoot_pipeline(
             Path::new(&request.reshoot_path),
             request.quality,
             Path::new(&request.projects_root),
-            request.regions,
-            request.guidance,
+            crate::pipeline::runner::ReshootPlan {
+                regions: request.regions,
+                guidance: request.guidance,
+                guidance_images: request.guidance_images,
+            },
         )
         .await;
     if let Err(error) = &result {

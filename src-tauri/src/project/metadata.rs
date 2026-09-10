@@ -171,6 +171,10 @@ pub struct ReshootProvenance {
     pub reshoot_source_path: PathBuf,
     pub regions: Vec<GaussianCrop>,
     pub guidance: Vec<String>,
+    /// Annotated guide images written into the derived project: the circled
+    /// region plus arrows marking where each shot should be taken from.
+    #[serde(default)]
+    pub guidance_images: Vec<PathBuf>,
     #[serde(default)]
     pub original_frame_count: u64,
     #[serde(default)]
