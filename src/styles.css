@@ -204,16 +204,8 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .reshoot-guide-head span { color: #9db0cd; font-family: "Cascadia Mono", monospace; font-size: 9px; }
 .reshoot-guide-head button { margin-left: auto; }
 .reshoot-guide-figure { margin: 6px 0; display: block; color: #9db0cd; }
-.reshoot-guide-figure-view { max-height: 190px; overflow: auto; background: #070b13; border: 1px solid rgba(130, 156, 204, .45); cursor: zoom-in; }
-.reshoot-guide-figure.open .reshoot-guide-figure-view { max-height: 62vh; cursor: zoom-out; }
-.reshoot-guide-figure-view img { display: block; }
-.reshoot-guide-zoom { margin-top: 4px; display: flex; align-items: center; gap: 5px; }
-.reshoot-guide-zoom input[type="range"] { flex: 1; min-width: 0; accent-color: #5684dd; }
-.reshoot-guide-zoom button { padding: 1px 6px; color: #e8f0ff; background: transparent; border: 1px solid #6f819d; cursor: pointer; font-size: 10px; }
-.reshoot-guide-zoom button:disabled { opacity: .45; cursor: default; }
-.reshoot-guide-zoom .mono { min-width: 34px; color: #9db0cd; font-size: 9px; text-align: right; }
-.reshoot-guide-zoom .reshoot-guide-expand { margin-left: auto; }
-.reshoot-guide-figure figcaption { margin-top: 3px; font-size: 9px; }
+.reshoot-guide-figure img { width: 100%; display: block; border: 1px solid rgba(130, 156, 204, .45); }
+.reshoot-guide-figure span { display: block; margin-top: 3px; font-size: 9px; }
 .reshoot-guide-figure.pending, .reshoot-guide-figure.missing { display: flex; align-items: center; gap: 5px; font-size: 9px; }
 .reshoot-guide-text { color: #cbd8ec; }
 .reshoot-guide-error { color: #ffb3a9; }
