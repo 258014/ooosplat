@@ -439,12 +439,14 @@ impl PipelineRunner {
         reshoot_input: &Path,
         quality: Quality,
         projects_root: &Path,
-        regions: Vec<crate::project::GaussianCrop>,
-        guidance: Vec<String>,
+        plan: ReshootPlan,
     ) -> Result<PipelineResult> {
-        if regions.is_empty() {
-            return Err(SplatError::Process("请至少圈选一个需要补拍的区域".into()));
-        }
+        plan.validate()?;
+        let ReshootPlan {
+            regions,
+            guidance,
+            guidance_images,
+        } = plan;
         let acceleration = self.verify_pipeline_engines().await?;
         self.events.acceleration(acceleration.clone());
         let (source_root, source_metadata) =
@@ -507,6 +509,8 @@ impl PipelineRunner {
         // checkpoint; if it is lost, resume can reconstruct it from provenance.
         metadata.source_path = stored_reshoot_source.clone();
         metadata.input_type = ProjectInputType::Images;
+        let guidance_images =
+            write_reshoot_guidance_images(&paths.project, &guidance_images).await?;
         metadata.reshoot = Some(ReshootProvenance {
             source_project_id,
             source_project_path: source_root.clone(),
@@ -514,6 +518,7 @@ impl PipelineRunner {
             reshoot_source_path: stored_reshoot_source,
             regions,
             guidance,
+            guidance_images,
             original_frame_count,
             reshoot_frame_count: prepared_reshoot.extracted_frames,
         });
@@ -1280,6 +1285,128 @@ fn checkpoint_stage(state: &PipelineStateFile) -> PipelineStage {
     }
 }
 
+/// Everything the user selected in the preview for one reshoot run.
+#[derive(Debug, Clone, Default)]
+pub struct ReshootPlan {
+    pub regions: Vec<crate::project::GaussianCrop>,
+    pub guidance: Vec<String>,
+    /// PNG data URLs: the circled region plus arrows for the shooting positions.
+    pub guidance_images: Vec<String>,
+}
+
+impl ReshootPlan {
+    fn validate(&self) -> Result<()> {
+        if self.regions.is_empty() {
+            return Err(SplatError::Process("请至少圈选一个需要补拍的区域".into()));
+        }
+        ensure_distinct_reshoot_regions(&self.regions)?;
+        if self.guidance.len() != self.regions.len()
+            || self.guidance_images.len() != self.regions.len()
+        {
+            return Err(SplatError::Process(
+                "补拍区域与补拍指引数量不一致，请重新圈选区域".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Two selections closer than this describe the same spot, not two regions.
+const RESHOOT_REGION_PRECISION: f64 = 1e3;
+
+fn reshoot_region_key(region: &crate::project::GaussianCrop) -> String {
+    let round = |value: f64| (value * RESHOOT_REGION_PRECISION).round() as i64;
+    match region {
+        crate::project::GaussianCrop::Sphere { center, radius } => format!(
+            "sphere:{}:{}:{}:{}",
+            round(center[0]),
+            round(center[1]),
+            round(center[2]),
+            round(*radius)
+        ),
+        crate::project::GaussianCrop::Box { center, size } => format!(
+            "box:{}:{}:{}:{}:{}:{}",
+            round(center[0]),
+            round(center[1]),
+            round(center[2]),
+            round(size[0]),
+            round(size[1]),
+            round(size[2])
+        ),
+    }
+}
+
+/// The reshoot list must describe distinct areas: a repeated selection would ask
+/// the shooter for the same footage twice and skew the merged frame set.
+fn ensure_distinct_reshoot_regions(regions: &[crate::project::GaussianCrop]) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for region in regions {
+        if !seen.insert(reshoot_region_key(region)) {
+            return Err(SplatError::Process(
+                "补拍清单中存在重复区域，请移除重复项或重新圈选不同区域".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Persist the annotated guidance images inside the derived project so the
+/// shooting plan stays traceable next to the frames it belongs to.
+async fn write_reshoot_guidance_images(
+    project_root: &Path,
+    images: &[String],
+) -> Result<Vec<PathBuf>> {
+    const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let directory = project_root.join("reshoot-guidance");
+    let mut written = Vec::new();
+    for (index, image) in images.iter().enumerate() {
+        if image.trim().is_empty() {
+            continue;
+        }
+        let payload = image
+            .split_once(',')
+            .filter(|(header, _)| header.starts_with("data:image/png"))
+            .map(|(_, payload)| payload)
+            .ok_or_else(|| SplatError::Process("补拍指引图格式无效，请重新生成".into()))?;
+        let bytes = decode_base64(payload)
+            .ok_or_else(|| SplatError::Process("补拍指引图无法解码，请重新生成".into()))?;
+        if !bytes.starts_with(&PNG_MAGIC) {
+            return Err(SplatError::Process("补拍指引图不是有效的 PNG".into()));
+        }
+        tokio::fs::create_dir_all(&directory).await?;
+        let path = directory.join(format!("region-{:02}.png", index + 1));
+        tokio::fs::write(&path, &bytes).await?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+/// Minimal standard-alphabet base64 decoder; the repository ships no base64 crate.
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    let mut output = Vec::with_capacity(input.len() / 4 * 3);
+    for byte in input.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\n' | b'\r' => continue,
+            _ => return None,
+        };
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    Some(output)
+}
+
 async fn count_image_files(directory: &Path) -> Result<u64> {
     let directory = directory.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -1524,6 +1651,78 @@ mod tests {
     }
 
     use super::*;
+
+    fn sphere_region(center: [f64; 3], radius: f64) -> crate::project::GaussianCrop {
+        crate::project::GaussianCrop::Sphere { center, radius }
+    }
+
+    #[test]
+    fn rejects_a_repeated_reshoot_region() {
+        let regions = vec![
+            sphere_region([1.0, 2.0, 3.0], 0.5),
+            sphere_region([1.0, 2.0, 3.0], 0.5),
+        ];
+        let error = ensure_distinct_reshoot_regions(&regions).unwrap_err();
+        assert!(error.to_string().contains("重复区域"));
+    }
+
+    #[test]
+    fn accepts_distinct_reshoot_regions() {
+        let regions = vec![
+            sphere_region([1.0, 2.0, 3.0], 0.5),
+            sphere_region([1.0, 2.0, 3.4], 0.5),
+            crate::project::GaussianCrop::Box {
+                center: [1.0, 2.0, 3.0],
+                size: [1.0, 1.0, 1.0],
+            },
+        ];
+        assert!(ensure_distinct_reshoot_regions(&regions).is_ok());
+    }
+
+    #[test]
+    fn decodes_png_data_urls_and_rejects_other_payloads() {
+        // "iVBORw0KGgo=" is the base64 form of the eight PNG signature bytes.
+        let signature = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        assert_eq!(decode_base64("iVBORw0KGgo=").unwrap(), signature);
+        assert!(decode_base64("####").is_none());
+        assert!(decode_base64("aGVsbG8=").is_some());
+    }
+
+    #[tokio::test]
+    async fn writes_guidance_images_into_the_derived_project() {
+        let root = tempfile::tempdir().unwrap();
+        let signature = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let images = vec![
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+            String::new(),
+        ];
+        let written = write_reshoot_guidance_images(root.path(), &images)
+            .await
+            .unwrap();
+
+        assert_eq!(written.len(), 1);
+        assert_eq!(
+            written[0],
+            root.path().join("reshoot-guidance").join("region-01.png")
+        );
+        assert_eq!(std::fs::read(&written[0]).unwrap(), signature);
+        assert!(!root
+            .path()
+            .join("reshoot-guidance")
+            .join("region-02.png")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_guidance_image_that_is_not_png() {
+        let root = tempfile::tempdir().unwrap();
+        let images = vec!["data:image/png;base64,aGVsbG8=".to_string()];
+        let error = write_reshoot_guidance_images(root.path(), &images)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("PNG"));
+        assert!(!root.path().join("reshoot-guidance").exists());
+    }
 
     #[test]
     fn parses_ffmpeg_progress() {

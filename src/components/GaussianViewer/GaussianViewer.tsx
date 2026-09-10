@@ -22,6 +22,7 @@ import {
   GSPLAT_STREAM_INSTANCE,
   type GSplatComponent,
   GSplatResource,
+  Mat4,
   PIXELFORMAT_RGBA8,
   PIXELFORMAT_R8,
   RenderTarget,
@@ -82,6 +83,16 @@ import type {
 } from "../../types/pipeline";
 import { PLY_TO_ENGINE_ROTATION } from "./CoordinateSystem";
 import {
+  composeReshootGuideImage,
+  findReshootRegion,
+  guideMarkerRadius,
+  regionGeometryLabel,
+  regionKey,
+  reshootGuidance,
+  shootingDirections,
+  type ReshootEntry,
+} from "./ReshootGuidance";
+import {
   copyFlippedRgbaRows,
   normalizedCaptureRegion,
   verticalFovForCapture,
@@ -136,6 +147,10 @@ interface SplatSceneApi {
   freezeCrop: (crop: Exclude<GaussianCrop, null>, deletedMask: Uint8Array) => Promise<Uint8Array>;
   alignView: (view: GaussianOrthographicView) => void;
   initializeCrop: (kind: "sphere" | "box", previous: GaussianCrop) => Exclude<GaussianCrop, null> | null;
+  /** Current view as top-down RGBA pixels, used to draw a reshoot guide. */
+  captureReshootFrame: () => Promise<{ width: number; height: number; rgba: Uint8ClampedArray } | null>;
+  /** Model-space point to image pixels, so the guide can circle the region. */
+  projectToScreen: (point: [number, number, number]) => { x: number; y: number; width: number; height: number; visible: boolean } | null;
   exportVideo: (options: {
     signal: AbortSignal;
     onProgress: (progress: GaussianVideoEncodingProgress) => void;
@@ -798,7 +813,46 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
       : { kind, center, size };
   }, [transformedModelBounds]);
 
-  useImperativeHandle(ref, () => ({ replay, exportVideo, selectRectangle, freezeCrop, alignView, initializeCrop }), [alignView, exportVideo, freezeCrop, initializeCrop, replay, selectRectangle]);
+  /**
+   * Captures the current view for a reshoot guide, and projects a model-space
+   * point to image pixels so the guide can circle the selected region.
+   */
+  const captureReshootFrame = useCallback(async () => {
+    if (appDestroyedRef.current || contextLostRef.current) return null;
+    const device = app.graphicsDevice as WebglGraphicsDevice;
+    const width = device.width;
+    const height = device.height;
+    if (!width || !height) return null;
+    app.render();
+    const pixels = new Uint8Array(width * height * 4);
+    device.setRenderTarget(null);
+    device.updateBegin();
+    await device.readPixelsAsync(0, 0, width, height, pixels, true);
+    if (appDestroyedRef.current) return null;
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    copyFlippedRgbaRows(pixels, rgba, width, height);
+    return { width, height, rgba };
+  }, [app]);
+
+  const projectToScreen = useCallback((point: [number, number, number]) => {
+    const cameraEntity = cameraRef.current;
+    const splatEntity = splatRef.current;
+    if (!cameraEntity?.camera || !splatEntity) return null;
+    const device = app.graphicsDevice;
+    const matrix = new Mat4().mul2(cameraEntity.camera.projectionMatrix, cameraEntity.camera.viewMatrix);
+    const world = splatEntity.getWorldTransform().transformPoint(new Vec3(point[0], point[1], point[2]));
+    const clip = matrix.transformPoint(world);
+    if (!Number.isFinite(clip.x) || !Number.isFinite(clip.y)) return null;
+    return {
+      x: (clip.x * 0.5 + 0.5) * device.width,
+      y: (1 - (clip.y * 0.5 + 0.5)) * device.height,
+      width: device.width,
+      height: device.height,
+      visible: clip.z >= 0 && clip.z <= 1,
+    };
+  }, [app]);
+
+  useImperativeHandle(ref, () => ({ replay, exportVideo, selectRectangle, freezeCrop, alignView, initializeCrop, captureReshootFrame, projectToScreen }), [alignView, captureReshootFrame, exportVideo, freezeCrop, initializeCrop, projectToScreen, replay, selectRectangle]);
 
   return <>
     <PreviewCamera ref={cameraRef} />
@@ -844,7 +898,12 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
   onExit: () => void | Promise<void>;
   onDisposed: (projectId: string) => void;
   pipelineRunning: boolean;
-  onStartReshoot: (projectId: string, regions: NonNullable<GaussianCrop>[], guidance: string[]) => void | Promise<void>;
+  onStartReshoot: (
+    projectId: string,
+    regions: NonNullable<GaussianCrop>[],
+    guidance: string[],
+    guideImages: Array<string | null>,
+  ) => void | Promise<void>;
   /** Opened from the project list's reshoot entry: land on the reshoot workflow. */
   reshootEntry?: boolean;
 }) {
@@ -883,8 +942,9 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
   const [navigationSaving, setNavigationSaving] = useState(false);
   const [cropFreezing, setCropFreezing] = useState(false);
   const [cropFreezeError, setCropFreezeError] = useState<string | null>(null);
-  const [reshootRegions, setReshootRegions] = useState<NonNullable<GaussianCrop>[]>([]);
+  const [reshootRegions, setReshootRegions] = useState<ReshootEntry[]>([]);
   const [reshootError, setReshootError] = useState<string | null>(null);
+  const [guidePending, setGuidePending] = useState<number | null>(null);
   const previewAssetUrl = useMemo(() => {
     if (!store.descriptor) return "";
     return withPreviewAssetRevision(store.descriptor.assetUrl, "retry", rendererRevision.toString());
@@ -1313,24 +1373,59 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
     error: "异常",
   }[viewport.phase];
   const videoBusy = !["idle", "completed", "error"].includes(videoPhase);
-  const addReshootRegion = () => {
+  const addReshootRegion = async () => {
     const crop = store.editing.crop;
     if (!crop) {
       setReshootError("请先使用“球选择”或“盒选择”圈出模糊区域。");
       return;
     }
-    setReshootRegions((regions) => [...regions, cloneCrop(crop)!]);
+    if (findReshootRegion(reshootRegions.map((entry) => entry.region), crop) >= 0) {
+      setReshootError("该区域已在补拍清单中。请调整选择范围或移动相机后再加入，避免重复补拍同一区域。");
+      return;
+    }
+    const index = reshootRegions.length;
+    const entry: ReshootEntry = { region: cloneCrop(crop)!, guidance: reshootGuidance(crop, index), guideImage: null };
+    setReshootRegions((regions) => [...regions, entry]);
     setReshootError(null);
+    setGuidePending(index);
+    try {
+      const projected = sceneApiRef.current?.projectToScreen(crop.center);
+      const frame = await sceneApiRef.current?.captureReshootFrame();
+      if (!projected || !frame) throw new Error("无法获取当前视角的画面。");
+      // Screen pixels per model unit, so the highlight matches the selection size.
+      const edgePoint: [number, number, number] = crop.kind === "sphere"
+        ? [crop.center[0] + crop.radius, crop.center[1], crop.center[2]]
+        : [crop.center[0] + crop.size[0] / 2, crop.center[1], crop.center[2]];
+      const edge = sceneApiRef.current?.projectToScreen(edgePoint);
+      const pixelsPerUnit = edge ? Math.hypot(edge.x - projected.x, edge.y - projected.y) || 1 : 1;
+      const guideImage = composeReshootGuideImage({
+        frame,
+        marker: { x: projected.x, y: projected.y, radius: guideMarkerRadius(crop, pixelsPerUnit) },
+        region: crop,
+        index,
+        directions: shootingDirections(crop),
+      });
+      if (!guideImage) throw new Error("无法生成补拍指引图。");
+      setReshootRegions((regions) => regions.map((item, position) => position === index ? { ...item, guideImage } : item));
+    } catch (error) {
+      // The region stays in the list: guidance text and the region geometry are
+      // still usable without the annotated frame.
+      setReshootError(`区域 ${index + 1} 的指引图生成失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setGuidePending(null);
+    }
   };
-  const reshootGuidance = reshootRegions.map((region, index) => region.kind === "sphere"
-    ? `区域 ${index + 1}：围绕圈选区域缓慢环拍，保持区域位于画面中央并覆盖至少两层视差。`
-    : `区域 ${index + 1}：从盒选区域正面、左右侧与上方各补拍一组高清画面，避免仅原地变焦。`);
   const startReshoot = async () => {
     if (!store.descriptor || reshootRegions.length === 0 || busy) {
       setReshootError("请至少添加一个需要补拍的区域。");
       return;
     }
-    await onStartReshoot(store.descriptor.projectId, reshootRegions, reshootGuidance);
+    await onStartReshoot(
+      store.descriptor.projectId,
+      reshootRegions.map((entry) => entry.region),
+      reshootRegions.map((entry) => entry.guidance),
+      reshootRegions.map((entry) => entry.guideImage),
+    );
   };
   const videoButtonLabel = videoPhase === "preparing"
     ? "准备导出"
@@ -1425,9 +1520,19 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
         {mode === "adjust" && (store.tool === "sphere" || store.tool === "box") && <SelectionPanel crop={store.editing.crop} kind={store.tool} onBegin={store.beginCropTransaction} onChange={store.setCropLive} onCommit={store.commitCropTransaction} onEnable={() => { const tool = useGaussianTransformStore.getState().tool; if (tool === "sphere" || tool === "box") enableCrop(tool); }} />}
         {mode === "adjust" && (store.tool === "sphere" || store.tool === "box") && <div className="reshoot-guide-panel">
           <strong>高清补拍区域</strong>
-          <p>用当前{store.tool === "sphere" ? "球选" : "盒选"}圈住模糊或细节不足的位置，然后加入补拍清单。</p>
-          <button type="button" disabled={!store.editing.crop || busy} onClick={addReshootRegion}>加入当前区域</button>
-          {reshootRegions.length > 0 && <ol>{reshootGuidance.map((guide, index) => <li key={`${guide}-${index}`}>{guide}<button type="button" aria-label={`移除补拍区域 ${index + 1}`} onClick={() => setReshootRegions((regions) => regions.filter((_, item) => item !== index))}>移除</button></li>)}</ol>}
+          <p>用当前{store.tool === "sphere" ? "球选" : "盒选"}圈住模糊或细节不足的位置，然后加入补拍清单。同一区域只会记录一次。</p>
+          <button type="button" disabled={!store.editing.crop || busy || guidePending !== null} onClick={() => void addReshootRegion()}>{guidePending !== null ? "正在生成指引图" : "加入当前区域"}</button>
+          {reshootRegions.length > 0 && <ol>{reshootRegions.map((entry, index) => <li key={regionKey(entry.region)}>
+            <div className="reshoot-guide-head"><b>区域 {index + 1}</b><span>{regionGeometryLabel(entry.region)}</span>
+              <button type="button" aria-label={`移除补拍区域 ${index + 1}`} onClick={() => setReshootRegions((regions) => regions.filter((_, item) => item !== index))}>移除</button>
+            </div>
+            {entry.guideImage
+              ? <a className="reshoot-guide-figure" href={entry.guideImage} target="_blank" rel="noreferrer" title="在新标签页查看指引图"><img src={entry.guideImage} alt={`区域 ${index + 1} 补拍方位指引`} /><span>箭头 = 补拍机位，指向该区域</span></a>
+              : guidePending === index
+                ? <p className="reshoot-guide-figure pending"><LoaderCircle className="spin" size={14} />正在生成方位指引图</p>
+                : <p className="reshoot-guide-figure missing">未生成指引图</p>}
+            <p className="reshoot-guide-text">{entry.guidance}</p>
+          </li>)}</ol>}
           {reshootError && <p className="reshoot-guide-error">{reshootError}</p>}
         </div>}
         {mode === "preview" && <div className="animation-hud">

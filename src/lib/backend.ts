@@ -47,8 +47,9 @@ export async function getProjectOverview(): Promise<ProjectOverview> { return in
 export async function setProjectsRoot(projectsRoot: string): Promise<{ projectsRoot: string }> { return invoke("set_projects_root", { projectsRoot }); }
 export async function startPipeline(path: string, quality: Quality, projectsRoot: string): Promise<PipelineResult> { return invoke("start_pipeline", { path, quality, projectsRoot }); }
 export async function resumePipeline(projectId: string): Promise<PipelineResult> { return invoke("resume_pipeline", { projectId }); }
-export async function startReshootPipeline(request: { sourceProjectId: string; reshootPath: string; quality: Quality; projectsRoot: string; regions: NonNullable<GaussianCrop>[]; guidance: string[] }): Promise<PipelineResult> {
-  return invoke("start_reshoot_pipeline", { request });
+export async function startReshootPipeline(request: { sourceProjectId: string; reshootPath: string; quality: Quality; projectsRoot: string; regions: NonNullable<GaussianCrop>[]; guidance: string[]; guideImages: Array<string | null> }): Promise<PipelineResult> {
+  // Regions without a generated guide image stay aligned by sending an empty slot.
+  return invoke("start_reshoot_pipeline", { request: { ...request, guideImages: request.guideImages.map((image) => image ?? "") } });
 }
 export async function cancelPipeline(): Promise<void> { return invoke("cancel_pipeline"); }
 export async function onPipelineEvent(handler: (event: PipelineEvent) => void): Promise<UnlistenFn> { return listen<PipelineEvent>("pipeline-event", ({ payload }) => handler(payload)); }
