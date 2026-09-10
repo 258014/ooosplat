@@ -92,6 +92,7 @@ import {
   shootingDirections,
   type ReshootEntry,
 } from "./ReshootGuidance";
+import { ZoomableGuideFigure } from "./ZoomableGuideFigure";
 import {
   copyFlippedRgbaRows,
   normalizedCaptureRegion,
@@ -1400,7 +1401,11 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
       const pixelsPerUnit = edge ? Math.hypot(edge.x - projected.x, edge.y - projected.y) || 1 : 1;
       const guideImage = composeReshootGuideImage({
         frame,
-        marker: { x: projected.x, y: projected.y, radius: guideMarkerRadius(crop, pixelsPerUnit) },
+        marker: {
+          x: projected.x,
+          y: projected.y,
+          radius: guideMarkerRadius(crop, pixelsPerUnit, Math.min(frame.width, frame.height)),
+        },
         region: crop,
         index,
         directions: shootingDirections(crop),
@@ -1527,7 +1532,7 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
               <button type="button" aria-label={`移除补拍区域 ${index + 1}`} onClick={() => setReshootRegions((regions) => regions.filter((_, item) => item !== index))}>移除</button>
             </div>
             {entry.guideImage
-              ? <a className="reshoot-guide-figure" href={entry.guideImage} target="_blank" rel="noreferrer" title="在新标签页查看指引图"><img src={entry.guideImage} alt={`区域 ${index + 1} 补拍方位指引`} /><span>箭头 = 补拍机位，指向该区域</span></a>
+              ? <ZoomableGuideFigure src={entry.guideImage} alt={`区域 ${index + 1} 补拍方位指引`} caption="箭头 = 补拍机位，指向该区域" />
               : guidePending === index
                 ? <p className="reshoot-guide-figure pending"><LoaderCircle className="spin" size={14} />正在生成方位指引图</p>
                 : <p className="reshoot-guide-figure missing">未生成指引图</p>}

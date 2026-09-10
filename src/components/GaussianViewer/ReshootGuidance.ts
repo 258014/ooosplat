@@ -130,76 +130,44 @@ export function reshootGuideArrows(marker: GuideMarker, directions: Array<{ angl
   });
 }
 
-/** Radius the highlighted circle uses for a region, in screen pixels. */
-export function guideMarkerRadius(region: ReshootRegion, pixelsPerUnit: number): number {
+/**
+ * Radius the highlighted circle uses, in capture pixels. The guide keeps the
+ * render as a photo, so the highlight only needs to stay visible: it is never
+ * smaller than 3% of the frame and never larger than 45% of it.
+ */
+export function guideMarkerRadius(region: ReshootRegion, pixelsPerUnit: number, frameMinSide = 0): number {
   const base = region.kind === "sphere" ? region.radius : Math.max(...region.size) / 2;
-  return Math.max(24, Math.min(420, Math.abs(base) * pixelsPerUnit));
+  const minimum = frameMinSide > 0 ? frameMinSide * 0.03 : 24;
+  const maximum = frameMinSide > 0 ? frameMinSide * 0.45 : 420;
+  return Math.max(minimum, Math.min(maximum, Math.abs(base) * pixelsPerUnit));
 }
 
-/**
- * Space the arrows, their labels, and a margin need beyond the highlight. The
- * guide crops to this so a small selection is never a speck in a full screenshot.
- */
-export const GUIDE_ARROW_MARGIN = 96;
+/** Guide pictures are shown at their natural size at 100%. */
+export const GUIDE_ZOOM_MIN = 1;
+export const GUIDE_ZOOM_MAX = 8;
+const GUIDE_ZOOM_STEP = 1.25;
 
-/** Fixed output size keeps labels and arrows readable on any window size. */
-export const GUIDE_IMAGE_SIZE = 900;
-
-/** A tiny marker is magnified until the crop is at most this share of the frame. */
-const GUIDE_MIN_VIEW_FRACTION = 0.35;
-
-export interface GuideViewport {
-  /** Square window taken from the capture. */
-  sourceX: number;
-  sourceY: number;
-  sourceSize: number;
-  /** Window scaled into a fixed-size square output. */
-  outputSize: number;
-  scale: number;
+/** Continuous zoom, so a wheel gesture or slider never jumps between fixed steps. */
+export function clampGuideZoom(value: number): number {
+  if (Number.isNaN(value)) return GUIDE_ZOOM_MIN;
+  return Math.round(Math.min(GUIDE_ZOOM_MAX, Math.max(GUIDE_ZOOM_MIN, value)) * 100) / 100;
 }
 
-/**
- * Chooses the square crop drawn around the region: big enough for every arrow,
- * small enough that the selection stays legible, and always inside the frame.
- */
-export function guideViewport(
-  frame: { width: number; height: number },
-  marker: GuideMarker,
-): GuideViewport {
-  const minSide = Math.min(frame.width, frame.height);
-  const required = (marker.radius + GUIDE_ARROW_MARGIN) * 2;
-  const sourceSize = Math.max(1, Math.min(minSide, Math.max(minSide * GUIDE_MIN_VIEW_FRACTION, required)));
-  const clamp = (value: number, minimum: number, maximum: number) => Math.min(Math.max(value, minimum), Math.max(minimum, maximum));
-  return {
-    sourceX: clamp(marker.x - sourceSize / 2, 0, frame.width - sourceSize),
-    sourceY: clamp(marker.y - sourceSize / 2, 0, frame.height - sourceSize),
-    sourceSize,
-    outputSize: GUIDE_IMAGE_SIZE,
-    scale: GUIDE_IMAGE_SIZE / sourceSize,
-  };
+export function zoomInGuide(current: number): number {
+  return clampGuideZoom(current * GUIDE_ZOOM_STEP);
 }
 
-/** Maps a captured-frame point into the cropped guide image. */
-export function guideViewportPoint(viewport: GuideViewport, point: { x: number; y: number }): { x: number; y: number } {
-  return {
-    x: (point.x - viewport.sourceX) * viewport.scale,
-    y: (point.y - viewport.sourceY) * viewport.scale,
-  };
+export function zoomOutGuide(current: number): number {
+  return clampGuideZoom(current / GUIDE_ZOOM_STEP);
 }
 
-/**
- * Keeps the highlight inside the guide image: an oversized or off-screen
- * selection is drawn at the largest size that still leaves room for the arrows.
- */
-export function guideMarkerInViewport(
-  viewport: GuideViewport,
-  marker: GuideMarker,
-): GuideMarker {
-  const mapped = guideViewportPoint(viewport, marker);
-  const radius = Math.min(Math.max(marker.radius * viewport.scale, viewport.outputSize * 0.08), viewport.outputSize * 0.36);
-  const margin = radius + GUIDE_ARROW_MARGIN * (viewport.outputSize / GUIDE_IMAGE_SIZE);
-  const clamp = (value: number) => Math.min(Math.max(value, margin), viewport.outputSize - margin);
-  return { x: clamp(mapped.x), y: clamp(mapped.y), radius };
+/** Wheel deltas map exponentially, so zooming feels even at every scale. */
+export function zoomFromWheel(current: number, deltaY: number): number {
+  return clampGuideZoom(current * Math.exp(-deltaY * 0.0015));
+}
+
+export function guideZoomLabel(zoom: number): string {
+  return `${Math.round(zoom * 100)}%`;
 }
 
 export function guideCaption(region: ReshootRegion, index: number): string {
@@ -207,8 +175,8 @@ export function guideCaption(region: ReshootRegion, index: number): string {
 }
 
 /**
- * Draws the reshoot guide over a captured preview frame: the circled region,
- * an inward arrow for every shooting position, and its label.
+ * Draws the reshoot marks over a captured render. The picture stays a plain
+ * photo of the project: no crop, no dimming, only a thin highlight and arrows.
  */
 export function drawReshootGuide(
   context: CanvasRenderingContext2D,
@@ -223,24 +191,24 @@ export function drawReshootGuide(
 ): void {
   const { width, height, marker, region, index, directions } = options;
   const arrows = reshootGuideArrows(marker, directions);
-  const scale = width / GUIDE_IMAGE_SIZE;
-  const fontSize = Math.round(15 * scale);
-  const captionSize = Math.round(18 * scale);
+  const unit = Math.max(width, height) / 1600;
+  const fontSize = Math.max(13, Math.round(13 * unit));
+  const captionSize = Math.max(15, Math.round(16 * unit));
 
   context.save();
-  context.lineWidth = 3 * scale;
-  context.strokeStyle = "#ffd166";
-  context.fillStyle = "rgba(255, 209, 102, .18)";
+  context.lineWidth = Math.max(2, 2.5 * unit);
+  context.strokeStyle = "rgba(255, 209, 102, .95)";
+  context.fillStyle = "rgba(255, 209, 102, .12)";
   context.beginPath();
   context.arc(marker.x, marker.y, marker.radius, 0, Math.PI * 2);
   context.fill();
   context.stroke();
 
-  context.strokeStyle = "#ff5d73";
-  context.fillStyle = "#ff5d73";
+  context.strokeStyle = "rgba(255, 93, 115, .92)";
+  context.fillStyle = "rgba(255, 93, 115, .92)";
   for (const arrow of arrows) {
     const angle = Math.atan2(arrow.toY - arrow.fromY, arrow.toX - arrow.fromX);
-    const headLength = 14 * scale;
+    const headLength = Math.max(10, 12 * unit);
     context.beginPath();
     context.moveTo(arrow.fromX, arrow.fromY);
     context.lineTo(arrow.toX, arrow.toY);
@@ -264,10 +232,10 @@ export function drawReshootGuide(
   context.textBaseline = "middle";
   context.fillStyle = "#ffffff";
   context.strokeStyle = "rgba(0, 0, 0, .72)";
-  context.lineWidth = 4 * scale;
+  context.lineWidth = Math.max(3, 4 * unit);
   for (const arrow of arrows) {
     // Keep a label inside the picture even when its arrow touches an edge.
-    const halfWidth = context.measureText(arrow.label).width / 2 + 6 * scale;
+    const halfWidth = context.measureText(arrow.label).width / 2 + 6;
     const labelX = Math.min(Math.max(arrow.labelX, halfWidth), width - halfWidth);
     const labelY = Math.min(Math.max(arrow.labelY, fontSize), height - captionSize * 1.6);
     context.strokeText(arrow.label, labelX, labelY);
@@ -275,16 +243,22 @@ export function drawReshootGuide(
   }
 
   const caption = guideCaption(region, index);
+  const barHeight = captionSize * 2.1;
+  context.fillStyle = "rgba(8, 12, 20, .62)";
+  context.fillRect(0, height - barHeight, width, barHeight);
   context.textAlign = "left";
+  context.textBaseline = "middle";
   context.font = `700 ${captionSize}px 'Microsoft YaHei UI', 'Segoe UI', sans-serif`;
-  context.strokeStyle = "rgba(0, 0, 0, .78)";
-  context.lineWidth = 5 * scale;
-  context.strokeText(caption, 18 * scale, height - 24 * scale);
-  context.fillText(caption, 18 * scale, height - 24 * scale);
+  context.fillStyle = "#ffffff";
+  context.fillText(caption, 16, height - barHeight / 2);
   context.restore();
 }
 
-/** Composes a full guide image from a captured frame and returns a PNG data URL. */
+/**
+ * Composes the guide image from a captured render and returns a PNG data URL.
+ * The render is kept as-is: the marks are an overlay, not a redrawn scene, so
+ * the picture still reads as a photo of the project.
+ */
 export function composeReshootGuideImage(options: {
   frame: { width: number; height: number; rgba: Uint8ClampedArray | Uint8Array };
   marker: GuideMarker;
@@ -295,46 +269,14 @@ export function composeReshootGuideImage(options: {
   const { frame, marker, region, index, directions } = options;
   if (frame.width <= 0 || frame.height <= 0) return null;
 
-  // Draw the capture first, then crop and magnify the area around the region so
-  // a small selection is never a speck inside a full screenshot.
-  const source = document.createElement("canvas");
-  source.width = frame.width;
-  source.height = frame.height;
-  const sourceContext = source.getContext("2d");
-  if (!sourceContext) return null;
-  const image = sourceContext.createImageData(frame.width, frame.height);
-  image.data.set(frame.rgba);
-  sourceContext.putImageData(image, 0, 0);
-
-  const viewport = guideViewport(frame, marker);
   const canvas = document.createElement("canvas");
-  canvas.width = viewport.outputSize;
-  canvas.height = viewport.outputSize;
+  canvas.width = frame.width;
+  canvas.height = frame.height;
   const context = canvas.getContext("2d");
   if (!context) return null;
-  context.imageSmoothingEnabled = true;
-  context.imageSmoothingQuality = "high";
-  context.drawImage(
-    source,
-    viewport.sourceX,
-    viewport.sourceY,
-    viewport.sourceSize,
-    viewport.sourceSize,
-    0,
-    0,
-    viewport.outputSize,
-    viewport.outputSize,
-  );
-  // Slightly darken the frame so the highlight and arrows stand out.
-  context.fillStyle = "rgba(6, 10, 18, .22)";
-  context.fillRect(0, 0, viewport.outputSize, viewport.outputSize);
-  drawReshootGuide(context, {
-    width: viewport.outputSize,
-    height: viewport.outputSize,
-    marker: guideMarkerInViewport(viewport, marker),
-    region,
-    index,
-    directions,
-  });
+  const image = context.createImageData(frame.width, frame.height);
+  image.data.set(frame.rgba);
+  context.putImageData(image, 0, 0);
+  drawReshootGuide(context, { width: frame.width, height: frame.height, marker, region, index, directions });
   return canvas.toDataURL("image/png");
 }

@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  clampGuideZoom,
   findReshootRegion,
-  GUIDE_ARROW_MARGIN,
-  GUIDE_IMAGE_SIZE,
+  GUIDE_ZOOM_MAX,
+  GUIDE_ZOOM_MIN,
   guideCaption,
-  guideMarkerInViewport,
   guideMarkerRadius,
-  guideViewport,
-  guideViewportPoint,
+  guideZoomLabel,
   isSameReshootRegion,
   regionGeometryLabel,
   regionKey,
@@ -15,6 +14,9 @@ import {
   reshootGuidance,
   reshootRegionsGuidance,
   shootingDirections,
+  zoomFromWheel,
+  zoomInGuide,
+  zoomOutGuide,
   type ReshootRegion,
 } from "./ReshootGuidance";
 
@@ -109,71 +111,45 @@ describe("reshoot guide layout", () => {
     expect(guideMarkerRadius(box([0, 0, 0], [2, 4, 1]), 1000)).toBe(420);
   });
 
+  it("keeps the highlight visible without swallowing the whole photo", () => {
+    const frameMinSide = 800;
+    expect(guideMarkerRadius(sphere([0, 0, 0], 0.01), 1, frameMinSide)).toBeCloseTo(24, 6);
+    expect(guideMarkerRadius(sphere([0, 0, 0], 1e6), 1, frameMinSide)).toBeCloseTo(frameMinSide * 0.45, 6);
+  });
+
   it("captions the guide image with the region and what the arrows mean", () => {
     expect(guideCaption(box([0, 0, 0]), 2)).toBe("区域 3 · 盒选 · 箭头 = 补拍机位（箭头指向被补拍区域）");
   });
 });
 
-describe("reshoot guide crop", () => {
-  const frame = { width: 1600, height: 900 };
-
-  it("magnifies a small selection so it is not a speck in the screenshot", () => {
-    const viewport = guideViewport(frame, { x: 800, y: 450, radius: 20 });
-
-    expect(viewport.sourceSize).toBeLessThanOrEqual(Math.min(frame.width, frame.height) * 0.35 + 1e-6);
-    expect(viewport.scale).toBeGreaterThan(2);
-    expect(viewport.outputSize).toBe(GUIDE_IMAGE_SIZE);
-    expect(guideMarkerInViewport(viewport, { x: 800, y: 450, radius: 20 }).radius).toBeGreaterThanOrEqual(GUIDE_IMAGE_SIZE * 0.08);
+describe("guide zoom", () => {
+  it("zooms continuously and never leaves the allowed range", () => {
+    expect(clampGuideZoom(2.345)).toBe(2.35);
+    expect(clampGuideZoom(0.2)).toBe(GUIDE_ZOOM_MIN);
+    expect(clampGuideZoom(99)).toBe(GUIDE_ZOOM_MAX);
+    expect(clampGuideZoom(Number.NaN)).toBe(GUIDE_ZOOM_MIN);
   });
 
-  it("widens the crop until it fits the arrows of a larger selection", () => {
-    const marker = { x: 800, y: 450, radius: 200 };
-    const viewport = guideViewport(frame, marker);
-
-    expect(viewport.sourceSize).toBe((marker.radius + GUIDE_ARROW_MARGIN) * 2);
-    expect(viewport.scale).toBeLessThan(2);
+  it("steps in and out by a fixed ratio", () => {
+    expect(zoomInGuide(1)).toBe(1.25);
+    expect(zoomOutGuide(2)).toBe(1.6);
+    expect(zoomOutGuide(1)).toBe(1);
+    expect(zoomInGuide(GUIDE_ZOOM_MAX)).toBe(GUIDE_ZOOM_MAX);
   });
 
-  it("stops at the frame instead of cropping past its edge", () => {
-    const viewport = guideViewport(frame, { x: 800, y: 450, radius: 400 });
-
-    expect(viewport.sourceSize).toBe(Math.min(frame.width, frame.height));
-    expect(viewport.sourceX).toBeGreaterThanOrEqual(0);
-    expect(viewport.sourceX + viewport.sourceSize).toBeLessThanOrEqual(frame.width);
+  it("maps wheel gestures exponentially in both directions", () => {
+    expect(zoomFromWheel(2, -100)).toBeGreaterThan(2);
+    expect(zoomFromWheel(2, 100)).toBeLessThan(2);
+    // At the minimum the gesture simply cannot zoom out any further.
+    expect(zoomFromWheel(1, 100)).toBe(GUIDE_ZOOM_MIN);
+    expect(zoomFromWheel(1, -1_000_000)).toBe(GUIDE_ZOOM_MAX);
+    // Equal gestures produce equal ratios, so zooming feels even at any scale.
+    expect(zoomFromWheel(4, -100) / 4).toBeCloseTo(zoomFromWheel(4, -100) / 4, 6);
+    expect(zoomFromWheel(4, -100) / 4).toBeCloseTo(zoomFromWheel(2, -100) / 2, 1);
   });
 
-  it("never crops outside the captured frame", () => {
-    for (const marker of [
-      { x: 0, y: 0, radius: 30 },
-      { x: 1600, y: 900, radius: 30 },
-      { x: -500, y: 1200, radius: 60 },
-    ]) {
-      const viewport = guideViewport(frame, marker);
-      expect(viewport.sourceX).toBeGreaterThanOrEqual(0);
-      expect(viewport.sourceY).toBeGreaterThanOrEqual(0);
-      expect(viewport.sourceX + viewport.sourceSize).toBeLessThanOrEqual(frame.width + 1e-6);
-      expect(viewport.sourceY + viewport.sourceSize).toBeLessThanOrEqual(frame.height + 1e-6);
-    }
-  });
-
-  it("maps a captured point into the cropped image", () => {
-    const viewport = { sourceX: 100, sourceY: 50, sourceSize: 450, outputSize: GUIDE_IMAGE_SIZE, scale: 2 };
-    expect(guideViewportPoint(viewport, { x: 100, y: 50 })).toEqual({ x: 0, y: 0 });
-    expect(guideViewportPoint(viewport, { x: 325, y: 275 })).toEqual({ x: 450, y: 450 });
-  });
-
-  it("keeps the highlight and its arrows inside the image", () => {
-    const viewport = guideViewport(frame, { x: 1600, y: 900, radius: 1200 });
-    const marker = guideMarkerInViewport(viewport, { x: 1600, y: 900, radius: 1200 });
-    const arrows = reshootGuideArrows(marker, shootingDirections(sphere([0, 0, 0])));
-
-    expect(marker.radius).toBeLessThanOrEqual(GUIDE_IMAGE_SIZE * 0.36);
-    for (const arrow of arrows) {
-      expect(Number.isFinite(arrow.fromX)).toBe(true);
-      expect(arrow.fromX).toBeGreaterThanOrEqual(0);
-      expect(arrow.fromX).toBeLessThanOrEqual(GUIDE_IMAGE_SIZE);
-      expect(arrow.fromY).toBeGreaterThanOrEqual(0);
-      expect(arrow.fromY).toBeLessThanOrEqual(GUIDE_IMAGE_SIZE);
-    }
+  it("labels the current zoom as a percentage", () => {
+    expect(guideZoomLabel(1)).toBe("100%");
+    expect(guideZoomLabel(2.5)).toBe("250%");
   });
 });
