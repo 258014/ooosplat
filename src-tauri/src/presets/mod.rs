@@ -1,3 +1,3 @@
 pub mod quality;
 
-pub use quality::{MapperPreference, Quality, QualityPreset};
+pub use quality::{BrushTuning, MapperPreference, Quality, QualityPreset};

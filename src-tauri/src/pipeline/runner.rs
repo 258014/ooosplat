@@ -1171,9 +1171,10 @@ impl PipelineRunner {
                 None,
                 true,
                 format!(
-                    "Brush 训练开始（使用可用图形后端）· {} iterations · 最大分辨率 {} · 预计约 {}",
+                    "Brush 训练开始（使用可用图形后端）· {} iterations · 最大分辨率 {}{} · 预计约 {}",
                     preset.brush_iterations,
                     preset.brush_max_resolution,
+                    brush_tuning_note(preset.brush_tuning),
                     format_duration(estimated_brush_duration_ms)
                 ),
                 Some(0),
@@ -1829,6 +1830,32 @@ async fn normalize_checkpoints(paths: &ProjectPaths, state: &mut PipelineStateFi
     Ok(())
 }
 
+/// Describes the Brush tuning actually in effect, so the console shows which
+/// training parameters ran instead of leaving them implicit in the preset.
+fn brush_tuning_note(tuning: crate::presets::BrushTuning) -> String {
+    let mut parts = Vec::new();
+    if let Some(degree) = tuning.sh_degree {
+        parts.push(format!("SH 阶数 {degree}"));
+    }
+    if let Some(stop) = tuning.growth_stop_iter {
+        parts.push(format!("致密化止于 {stop} 步"));
+    }
+    if let Some(every) = tuning.refine_every {
+        parts.push(format!("细化间隔 {every}"));
+    }
+    if let Some(max) = tuning.max_splats {
+        parts.push(format!("高斯上限 {max}"));
+    }
+    if tuning.single_export {
+        parts.push("仅最终导出".to_owned());
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", parts.join(" · "))
+    }
+}
+
 fn smart_filter_enabled(state: &PipelineStateFile) -> bool {
     state.input_type == ProjectInputType::Video && state.preset.preset().enable_smart_filter
 }
@@ -2473,6 +2500,20 @@ mod tests {
         assert!(!state.features_complete);
         assert!(!state.matching_complete);
         assert_eq!(state.stage, PipelineStage::ExtractingFrames);
+    }
+
+    #[test]
+    fn brush_tuning_note_reports_only_active_knobs() {
+        use crate::presets::BrushTuning;
+        // Untuned presets add nothing to the console line.
+        assert_eq!(brush_tuning_note(BrushTuning::brush_defaults()), "");
+        let note = brush_tuning_note(BrushTuning::high_detail());
+        assert!(note.contains("SH 阶数 2"), "{note}");
+        assert!(note.contains("致密化止于 12000 步"), "{note}");
+        assert!(note.contains("仅最终导出"), "{note}");
+        // Knobs that stay unset must not be advertised as if they were applied.
+        assert!(!note.contains("细化间隔"), "{note}");
+        assert!(!note.contains("高斯上限"), "{note}");
     }
 
     #[test]
