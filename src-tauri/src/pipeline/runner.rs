@@ -1315,16 +1315,20 @@ impl PipelineRunner {
                     return;
                 }
                 let parsed = match mode {
-                    ObserverMode::Ffmpeg => parse_ffmpeg_frame(&line).map(|current| {
-                        (
+                    ObserverMode::Ffmpeg => {
+                        parse_ffmpeg_frame(&line).map(|current| MapperProgress::Registered {
                             current,
-                            expected_total,
-                            format!("FFmpeg 已输出 {current} 帧"),
-                        )
-                    }),
+                            total: expected_total,
+                            message: format!("FFmpeg 已输出 {current} 帧"),
+                        })
+                    }
                     ObserverMode::BracketProgress => {
                         parse_bracket_progress(&line).map(|(current, total)| {
-                            (current, Some(total), friendly_engine_line(&line))
+                            MapperProgress::Registered {
+                                current,
+                                total: Some(total),
+                                message: friendly_engine_line(&line),
+                            }
                         })
                     }
                     ObserverMode::Mapper => {
@@ -1332,10 +1336,29 @@ impl PipelineRunner {
                     }
                     ObserverMode::Brush { .. } => None,
                 };
-                if let Some((current, total, message)) = parsed {
-                    let progress = total
-                        .filter(|value| *value > 0)
-                        .map(|value| current as f32 / value as f32);
+                if let Some(parsed) = parsed {
+                    let (progress, message, current, total, unit) = match parsed {
+                        MapperProgress::Registered {
+                            current,
+                            total,
+                            message,
+                        } => (
+                            total
+                                .filter(|value| *value > 0)
+                                .map(|value| current as f32 / value as f32),
+                            message,
+                            Some(current),
+                            total,
+                            Some("张"),
+                        ),
+                        MapperProgress::Stage { fraction, message } => (
+                            Some(fraction.clamp(0.0, 1.0)),
+                            message,
+                            None,
+                            expected_total,
+                            None,
+                        ),
+                    };
                     events.send(
                         stage,
                         Some(engine),
@@ -1344,9 +1367,9 @@ impl PipelineRunner {
                         progress,
                         progress.is_none(),
                         message,
-                        Some(current),
+                        current,
                         total,
-                        Some("张"),
+                        unit,
                     );
                 } else if matches!(mode, ObserverMode::Brush { .. }) {
                     let progress =
@@ -1411,26 +1434,87 @@ fn parse_bracket_progress(line: &str) -> Option<(u64, u64)> {
     Some((current.trim().parse().ok()?, total.trim().parse().ok()?))
 }
 
+/// Progress fractions for the global mapper's published stages.
+///
+/// The global pipeline never prints a registration counter, so progress is
+/// derived from the stage headings it does print. The fractions reflect where the
+/// time goes on real footage: on this hardware the positioning solve dominates,
+/// while rotation averaging and track establishment are near-instant.
+const GLOBAL_MAPPER_STAGES: &[(&str, f32, &str)] = &[
+    (
+        "=== Running rotation averaging ===",
+        0.05,
+        "全局重建：旋转平均",
+    ),
+    (
+        "=== Running track establishment ===",
+        0.15,
+        "全局重建：建立轨迹",
+    ),
+    (
+        "=== Running global positioning ===",
+        0.30,
+        "全局重建：全局定位（最耗时）",
+    ),
+    (
+        "=== Running iterative bundle adjustment ===",
+        0.65,
+        "全局重建：整体光束法平差",
+    ),
+    (
+        "=== Running iterative retriangulation and refinement ===",
+        0.80,
+        "全局重建：重三角化与精化",
+    ),
+];
+
+/// One parsed mapper progress signal.
+///
+/// The two backends report progress in fundamentally different ways, so the two
+/// shapes are kept apart instead of being flattened into a count pair.
+enum MapperProgress {
+    /// The incremental mapper registers images one by one.
+    Registered {
+        current: u64,
+        total: Option<u64>,
+        message: String,
+    },
+    /// The global mapper only announces which stage it entered.
+    Stage { fraction: f32, message: String },
+}
+
 fn parse_mapper_progress(
     line: &str,
     counter: &AtomicU64,
     expected_total: Option<u64>,
-) -> Option<(u64, Option<u64>, String)> {
+) -> Option<MapperProgress> {
     if let Some(value) =
         value_after(line, "num_reg_frames=").or_else(|| value_after(line, "num_reg_frames ="))
     {
         let current = value.parse().ok()?;
-        return Some((current, expected_total, format!("已注册 {current} 张图像")));
+        return Some(MapperProgress::Registered {
+            current,
+            total: expected_total,
+            message: format!("已注册 {current} 张图像"),
+        });
     }
     if line.contains("Registering image #") {
         let current = counter.fetch_add(1, Ordering::Relaxed) + 1;
-        return Some((
+        return Some(MapperProgress::Registered {
             current,
-            expected_total,
-            format!("正在注册第 {current} 张图像"),
-        ));
+            total: expected_total,
+            message: format!("正在注册第 {current} 张图像"),
+        });
     }
-    None
+    // The incremental mapper never announces its stages, and the global mapper
+    // never counts registered images, so both shapes have to be understood here.
+    let (_, fraction, label) = GLOBAL_MAPPER_STAGES
+        .iter()
+        .find(|(marker, _, _)| line.contains(marker))?;
+    Some(MapperProgress::Stage {
+        fraction: *fraction,
+        message: (*label).to_owned(),
+    })
 }
 
 fn value_after<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
@@ -2648,13 +2732,46 @@ mod tests {
     #[test]
     fn parses_mapper_registration() {
         let counter = AtomicU64::new(0);
-        let value = parse_mapper_progress(
+        let parsed = parse_mapper_progress(
             "Registering image #90 (num_reg_frames=86)",
             &counter,
             Some(100),
         )
         .unwrap();
-        assert_eq!(value.0, 86);
+        match parsed {
+            MapperProgress::Registered { current, .. } => assert_eq!(current, 86),
+            MapperProgress::Stage { .. } => panic!("expected a registration count"),
+        }
+    }
+
+    #[test]
+    fn parses_global_mapper_stages_as_progress() {
+        // The global mapper never counts registered images, so the Reconstructing
+        // stage would otherwise report no progress at all on the default backend.
+        let counter = AtomicU64::new(0);
+        let expected = [
+            "I20260913 03:56:56.504001 32524 global_mapper.cc:465] === Running rotation averaging ===",
+            "I20260913 03:56:56.504001 32524 global_mapper.cc:477] === Running track establishment ===",
+            "I20260913 03:56:56.504001 32524 global_mapper.cc:487] === Running global positioning ===",
+            "I20260913 03:56:56.504001 32524 global_mapper.cc:502] === Running iterative bundle adjustment ===",
+            "I20260913 03:56:56.504001 32524 global_mapper.cc:519] === Running iterative retriangulation and refinement ===",
+        ];
+        let mut previous = -1.0_f32;
+        for line in expected {
+            let Some(MapperProgress::Stage { fraction, .. }) =
+                parse_mapper_progress(line, &counter, Some(295))
+            else {
+                panic!("global mapper stage line was not recognised: {line}");
+            };
+            assert!(fraction > previous, "stage progress must advance: {line}");
+            previous = fraction;
+        }
+        assert!(
+            previous < 1.0,
+            "the stage walk must leave room for completion"
+        );
+        // Unrelated chatter must not be mistaken for a stage.
+        assert!(parse_mapper_progress("Loading images...", &counter, None).is_none());
     }
 
     #[test]

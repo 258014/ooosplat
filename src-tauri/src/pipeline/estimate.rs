@@ -41,6 +41,12 @@ fn reconstruction_estimate_ms(frames: u64, backend: MapperBackend) -> f64 {
 #[derive(Debug, Clone)]
 pub struct RuntimeSample {
     pub quality: Quality,
+    /// Mapper backend this historical run actually used.
+    ///
+    /// The two backends have separate cost models, so a sample only calibrates
+    /// machine speed when it is normalised by the model that produced it;
+    /// otherwise the ratio measures the gap between the two models instead.
+    pub backend: MapperBackend,
     /// Images this historical run actually fed to COLMAP, measured on the same
     /// basis as the estimate so the calibration ratio stays meaningful.
     pub mapped_frames: u64,
@@ -193,7 +199,7 @@ fn estimate_runtime_for_input(
         .into_iter()
         .map(|sample| {
             let expected =
-                base_estimate_ms_with_backend(sample.mapped_frames, sample.quality, backend);
+                base_estimate_ms_with_backend(sample.mapped_frames, sample.quality, sample.backend);
             (sample.duration_ms as f64 / expected.max(1) as f64).clamp(0.15, 5.0)
         })
         .collect::<Vec<_>>();
@@ -350,6 +356,43 @@ mod tests {
     }
 
     #[test]
+    fn calibration_normalises_each_sample_by_its_own_backend() {
+        let video = video();
+        let plan = plan_with_frames(533);
+        let mapped = expected_mapped_frames(&plan, Quality::Balanced);
+        let global_base =
+            base_estimate_ms_with_backend(mapped, Quality::Balanced, MapperBackend::Global);
+        let incremental_base =
+            base_estimate_ms_with_backend(mapped, Quality::Balanced, MapperBackend::Incremental);
+        assert!(
+            reconstruction_estimate_ms(mapped, MapperBackend::Incremental)
+                > reconstruction_estimate_ms(mapped, MapperBackend::Global) * 2.0,
+            "the two backend models must differ enough for the mistake to matter"
+        );
+
+        // A historical run of the same size on this same machine, but using the
+        // other backend. Normalising it by the estimate's backend would read that
+        // model gap as machine speed and inflate every later estimate.
+        let sample = RuntimeSample {
+            quality: Quality::Balanced,
+            backend: MapperBackend::Incremental,
+            mapped_frames: mapped,
+            duration_ms: incremental_base,
+        };
+        let estimate = estimate_runtime_with_backend(
+            &video,
+            &plan,
+            Quality::Balanced,
+            &[sample],
+            MapperBackend::Global,
+        );
+        assert_eq!(
+            estimate.estimated_ms, global_base,
+            "a machine-speed ratio of 1.0 must leave the estimate on its own model"
+        );
+    }
+
+    #[test]
     fn estimates_use_the_post_filter_frame_count() {
         let plan = plan_with_frames(533);
         let quality = Quality::Balanced;
@@ -400,6 +443,7 @@ mod tests {
         let base_total = base_estimate_ms(mapped, Quality::Balanced);
         let sample = RuntimeSample {
             quality: Quality::Balanced,
+            backend: MapperBackend::Global,
             mapped_frames: mapped,
             duration_ms: base_total * 2,
         };
@@ -424,6 +468,7 @@ mod tests {
         };
         let sample = RuntimeSample {
             quality: Quality::Fast,
+            backend: MapperBackend::Global,
             mapped_frames: 226,
             duration_ms: 858_613,
         };
@@ -447,16 +492,19 @@ mod tests {
         let samples = [
             RuntimeSample {
                 quality: Quality::Balanced,
+                backend: MapperBackend::Global,
                 mapped_frames: mapped,
                 duration_ms: base_estimate_ms(mapped, Quality::Balanced) * 2,
             },
             RuntimeSample {
                 quality: Quality::Fast,
+                backend: MapperBackend::Global,
                 mapped_frames: 320,
                 duration_ms: 374_000,
             },
             RuntimeSample {
                 quality: Quality::High,
+                backend: MapperBackend::Global,
                 mapped_frames: 416,
                 duration_ms: 10_464_000,
             },
@@ -481,16 +529,19 @@ mod tests {
         let samples = [
             RuntimeSample {
                 quality: Quality::Fast,
+                backend: MapperBackend::Global,
                 mapped_frames: mapped,
                 duration_ms: base,
             },
             RuntimeSample {
                 quality: Quality::Fast,
+                backend: MapperBackend::Global,
                 mapped_frames: mapped,
                 duration_ms: base * 2,
             },
             RuntimeSample {
                 quality: Quality::Fast,
+                backend: MapperBackend::Global,
                 mapped_frames: mapped * 4,
                 duration_ms: base * 2,
             },

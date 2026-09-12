@@ -48,6 +48,50 @@ Write-Host ""
 $samples = @()
 $skipped = @()
 
+# Splits a COLMAP log into one entry per invocation. ProcessManager writes an
+# `executable:` / `arguments:` header before every run, which is the only
+# reliable boundary between stages inside this append-only file.
+function Get-MapperInvocationTiming {
+    param([string]$LogPath, [string]$Command)
+
+    $log = Get-Content -LiteralPath $LogPath -Raw
+    $blocks = [regex]::Split($log, '(?m)^(?=executable: )')
+    $found = $null
+    foreach ($block in $blocks) {
+        $lines = $block -split "`r?`n"
+        $argumentIndex = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i].Trim() -eq 'arguments:') { $argumentIndex = $i + 1; break }
+        }
+        if ($argumentIndex -lt 0) { continue }
+        $subcommand = ''
+        for ($i = $argumentIndex; $i -lt $lines.Count; $i++) {
+            $candidate = $lines[$i].Trim()
+            if ($candidate -ne '') { $subcommand = $candidate; break }
+        }
+        if ($subcommand -ne $Command) { continue }
+
+        # global_mapper reports seconds after Solve(); the incremental pipeline
+        # never prints that sentence and instead ends with its total timer.
+        $milliseconds = $null
+        if ($block -match 'Reconstruction done in ([0-9]+(?:\.[0-9]+)?) seconds') {
+            $milliseconds = [math]::Round([double]$Matches[1] * 1000, 1)
+        } elseif ($block -match '(?s).*Elapsed time: ([0-9]+(?:\.[0-9]+)?) \[minutes\]') {
+            # Windows PowerShell 5.1 has no digit separators, so 60000 is written out.
+            $milliseconds = [math]::Round([double]$Matches[1] * 60000, 1)
+        }
+        if ($null -eq $milliseconds) { continue }
+
+        $stamp = ''
+        if ($block -match '[IWEF](\d{8}) ([\d:\.]+)') {
+            $stamp = "$($Matches[1]) $($Matches[2].Split('.')[0])"
+        }
+        # Keep the last block: a resumed project appends a newer run to the file.
+        $found = [pscustomobject]@{ Milliseconds = $milliseconds; Timestamp = $stamp }
+    }
+    return $found
+}
+
 foreach ($project in Get-ChildItem -LiteralPath $ProjectsRoot -Directory) {
     $metadataPath = Join-Path $project.FullName 'project.json'
     if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) { continue }
@@ -85,29 +129,35 @@ foreach ($project in Get-ChildItem -LiteralPath $ProjectsRoot -Directory) {
         continue
     }
 
-    # The mapper's own wall time comes from COLMAP's final summary line.
+    # logs/colmap.log is append-only and shared by every COLMAP stage, including
+    # both mapper attempts when the global mapper falls back. The wall time must
+    # therefore be read from the invocation block that belongs to the backend the
+    # project actually finished with, never from the first matching line in the file.
     $logPath = Join-Path $project.FullName 'logs\colmap.log'
     if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
         $skipped += "$($project.Name)：缺少 logs/colmap.log"
         continue
     }
-    $log = Get-Content -LiteralPath $logPath -Raw
-    $mapperMs = $null
-    if ($log -match 'Reconstruction done in ([0-9]+(?:\.[0-9]+)?) seconds') {
-        $mapperMs = [math]::Round([double]$Matches[1] * 1000, 1)
-    }
-    if ($null -eq $mapperMs) {
-        $skipped += "$($project.Name)：日志中没有 'Reconstruction done in ... seconds'"
+    if ([string]::IsNullOrWhiteSpace($backend)) {
+        $skipped += "$($project.Name)：state.json 未记录 mapperBackend，无法把日志归属到某个后端"
         continue
     }
+    $expectedCommand = if ($backend -eq 'global') { 'global_mapper' } else { 'mapper' }
+    $timing = Get-MapperInvocationTiming -LogPath $logPath -Command $expectedCommand
+    if ($null -eq $timing) {
+        $skipped += "$($project.Name)：日志中没有 $expectedCommand 调用块的可用计时行"
+        continue
+    }
+    $mapperMs = $timing.Milliseconds
 
     $inputImages = $metadata.output.inputImages
     $registered = $metadata.output.registeredImages
     $samples += [pscustomobject]@{
         Project        = $project.Name
         StartedAt      = $started.ToString('yyyy-MM-dd HH:mm:ss')
+        MapperRunAt    = $timing.Timestamp
         Preset         = [string]$metadata.quality
-        Backend        = if ([string]::IsNullOrWhiteSpace($backend)) { 'unknown' } else { $backend }
+        Backend        = $backend
         MappedFrames   = $mapped
         Registered     = $registered
         RegisteredRate = if ($mapped -gt 0) { [math]::Round($registered / $mapped, 4) } else { $null }

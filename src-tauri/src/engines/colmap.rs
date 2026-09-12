@@ -65,18 +65,21 @@ pub fn detect_cli_family(feature_help: &str, matching_help: &str) -> Option<Colm
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColmapCliCapabilities {
     family: ColmapCliFamily,
-    view_graph_calibrator: bool,
+    /// `Some(true)` = the subcommand answered, `Some(false)` = it is absent in
+    /// this build, `None` = the probe failed and the answer is still unknown.
+    /// An unknown answer must never be cached as "unsupported".
+    view_graph_calibrator: Option<bool>,
 }
 
 impl ColmapCliCapabilities {
     pub const fn from_family(family: ColmapCliFamily) -> Self {
         Self {
             family,
-            view_graph_calibrator: false,
+            view_graph_calibrator: None,
         }
     }
 
-    const fn with_view_graph_calibrator(self, supported: bool) -> Self {
+    const fn with_view_graph_calibrator(self, supported: Option<bool>) -> Self {
         Self {
             family: self.family,
             view_graph_calibrator: supported,
@@ -87,14 +90,20 @@ impl ColmapCliCapabilities {
         self.family
     }
 
-    /// Whether `view_graph_calibrator` exists in this build.
+    /// Whether `view_graph_calibrator` is known to exist in this build.
     ///
     /// The global mapper warns that it depends on focal-length priors and
     /// recommends running this step first. Frames extracted by FFmpeg carry no
     /// EXIF, so the cameras COLMAP creates start without priors, and this step is
     /// worth running wherever the subcommand actually exists.
     pub const fn has_view_graph_calibrator(self) -> bool {
-        self.view_graph_calibrator
+        matches!(self.view_graph_calibrator, Some(true))
+    }
+
+    /// Whether every probe produced a definite answer, so the result is safe to
+    /// cache for the rest of the process.
+    const fn is_conclusive(self) -> bool {
+        self.view_graph_calibrator.is_some()
     }
 
     fn max_image_size_option(self) -> &'static str {
@@ -207,16 +216,22 @@ pub async fn cli_capabilities(
     }
     let feature_help = command_help(executable, "feature_extractor", manager).await?;
     let matching_help = command_help(executable, "sequential_matcher", manager).await?;
-    // Missing this subcommand is not a capability failure, so it is probed
-    // separately and only recorded as a flag.
+    // A missing subcommand is not a capability failure, so it is probed
+    // separately. A failed probe stays `None`: the subcommand may well exist, and
+    // caching a transient spawn or cancellation failure as "unsupported" would
+    // silently skip the calibration for the rest of the process.
     let view_graph_calibrator = command_help(executable, "view_graph_calibrator", manager)
         .await
-        .is_ok();
+        .map(|_| true)
+        .ok();
     let detected = detect_cli_family(&feature_help, &matching_help).map(|family| {
         ColmapCliCapabilities::from_family(family).with_view_graph_calibrator(view_graph_calibrator)
     });
-    if let Ok(mut entries) = cache.entries.lock() {
-        entries.insert(key, detected);
+    if let (Some(capabilities), Ok(mut entries)) = (
+        detected.filter(|value| value.is_conclusive()),
+        cache.entries.lock(),
+    ) {
+        entries.insert(key, Some(capabilities));
     }
     detected.ok_or_else(unsupported_cli_error)
 }

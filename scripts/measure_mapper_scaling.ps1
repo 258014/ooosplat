@@ -190,7 +190,9 @@ foreach ($level in $Levels) {
         }
         $sorted = $times | Sort-Object
         $median = if ($sorted.Count % 2 -eq 1) {
-            $sorted[[int]($sorted.Count / 2)]
+            # Floor instead of a cast: [int](3 / 2) rounds 1.5 up to 2 and would
+            # report the slowest of three runs as the median.
+            $sorted[[int][math]::Floor($sorted.Count / 2)]
         } else {
             ($sorted[$sorted.Count / 2 - 1] + $sorted[$sorted.Count / 2]) / 2
         }

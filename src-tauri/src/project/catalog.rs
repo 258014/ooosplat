@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    engines::MapperBackend,
     error::{Result, SplatError},
     pipeline::estimate::RuntimeSample,
     project::{manager::atomic_write_json, ProjectMetadata, ProjectStatus, PROJECT_APP_ID},
@@ -41,6 +42,7 @@ pub async fn runtime_samples() -> Vec<RuntimeSample> {
         };
         samples.push(RuntimeSample {
             quality: metadata.quality,
+            backend: runtime_sample_backend(state_bytes.as_deref()),
             mapped_frames,
             duration_ms,
         });
@@ -75,6 +77,24 @@ fn runtime_sample_frame_count(
         })
         .or(output_frames)
         .filter(|count| *count > 0)
+}
+
+/// Mapper backend a run actually used, read from its checkpoint.
+///
+/// State files written before the backend was recorded default to the
+/// incremental mapper, which is what every run used back then.
+fn runtime_sample_backend(state_bytes: Option<&[u8]>) -> MapperBackend {
+    state_bytes
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|state| {
+            state
+                .pointer("/mapperBackend")
+                .and_then(|value| value.as_str())
+                .and_then(|value| {
+                    serde_json::from_value(serde_json::Value::String(value.into())).ok()
+                })
+        })
+        .unwrap_or(MapperBackend::Incremental)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -482,6 +502,31 @@ mod tests {
             Some(320)
         );
         assert_eq!(runtime_sample_frame_count(None, Some(0)), None);
+    }
+
+    #[test]
+    fn runtime_sample_backend_reads_the_recorded_mapper() {
+        // The two backends have different cost models, so a sample can only
+        // calibrate machine speed when it is normalised by the model that ran.
+        assert_eq!(
+            runtime_sample_backend(Some(br#"{"mapperBackend":"global"}"#)),
+            MapperBackend::Global
+        );
+        assert_eq!(
+            runtime_sample_backend(Some(br#"{"mapperBackend":"incremental"}"#)),
+            MapperBackend::Incremental
+        );
+        // State files written before the backend was recorded used the
+        // incremental mapper, and files without a backend must say so.
+        assert_eq!(
+            runtime_sample_backend(Some(br#"{"stage":"completed"}"#)),
+            MapperBackend::Incremental
+        );
+        assert_eq!(
+            runtime_sample_backend(Some(br#"{"mapperBackend":null}"#)),
+            MapperBackend::Incremental
+        );
+        assert_eq!(runtime_sample_backend(None), MapperBackend::Incremental);
     }
 
     #[test]
