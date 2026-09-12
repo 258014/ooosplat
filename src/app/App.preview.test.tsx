@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores/appStore";
 import { useGaussianTransformStore } from "../stores/gaussianTransformStore";
+import { LanguageProvider } from "../i18n";
 import type { ProjectSummary } from "../types/pipeline";
 
 const mocks = vi.hoisted(() => ({
@@ -86,6 +87,10 @@ describe("App preview workspace", () => {
 
   beforeEach(async () => {
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    // jsdom does not implement scrollIntoView, and starting a run renders the live log,
+    // whose auto-scroll effect then calls it.
+    Element.prototype.scrollIntoView = vi.fn();
+    window.localStorage.setItem("ooo-splat-language", "zh-CN");
     if (!window.requestAnimationFrame) {
       window.requestAnimationFrame = (callback) => window.setTimeout(() => callback(performance.now()), 0);
       window.cancelAnimationFrame = (handle) => window.clearTimeout(handle);
@@ -138,13 +143,14 @@ describe("App preview workspace", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    await act(async () => { root.render(<App />); });
+    await act(async () => { root.render(<LanguageProvider><App /></LanguageProvider>); });
     await flush();
   });
 
   afterEach(async () => {
     await act(async () => { root.unmount(); });
     container.remove();
+    window.localStorage.clear();
   });
 
   it("shows the current package version and a start action without a trailing arrow", () => {
@@ -156,8 +162,10 @@ describe("App preview workspace", () => {
   });
 
   it("offers a reshoot entry on a completed project and opens the preview in reshoot mode", async () => {
-    const reshootButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "高清补拍");
-    expect(reshootButton).not.toBeUndefined();
+    // Selected by class rather than by label: the row is translated, so asserting
+    // on text would couple this test to the active interface language.
+    const reshootButton = container.querySelector<HTMLButtonElement>(".reshoot-link");
+    expect(reshootButton).not.toBeNull();
 
     await act(async () => { reshootButton?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await flush();
@@ -167,7 +175,7 @@ describe("App preview workspace", () => {
   });
 
   it("opens a plain preview without the reshoot workflow", async () => {
-    const previewButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "预览");
+    const previewButton = container.querySelector<HTMLButtonElement>(".preview-link");
 
     await act(async () => { previewButton?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await flush();
@@ -179,11 +187,28 @@ describe("App preview workspace", () => {
     const unfinished = { ...project, status: "cancelled" as const, finalPly: null, completedAt: null };
     await act(async () => { useAppStore.setState({ projects: [unfinished] }); });
 
-    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "高清补拍")).toBeUndefined();
-    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "继续任务")).not.toBeUndefined();
+    expect(container.querySelector(".reshoot-link")).toBeNull();
+    expect(container.querySelector(".resume-link")).not.toBeNull();
   });
 
-  it("shows automatic mask extraction when the selected video has alpha", async () => {    act(() => useAppStore.setState({
+  it("switches the complete task workspace to English without reloading", async () => {
+    const languageButton = container.querySelector<HTMLButtonElement>(".language-action");
+    expect(languageButton?.textContent).toContain("EN");
+    expect(languageButton?.title).toBe("中英文切换 / Switch language");
+
+    await act(async () => languageButton?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+    expect(container.textContent).toContain("01 Create New Task");
+    expect(container.textContent).toContain("02 Task History");
+    expect(container.textContent).toContain("Start Generation");
+    expect(container.textContent).toContain("Checking bundled engines");
+    expect(languageButton?.textContent).toContain("中文");
+    expect(languageButton?.title).toBe("中英文切换 / Switch language");
+    expect(window.localStorage.getItem("ooo-splat-language")).toBe("en");
+  });
+
+  it("shows automatic mask extraction when the selected video has alpha", async () => {
+    act(() => useAppStore.setState({
       video: {
         duration: 10,
         width: 1920,

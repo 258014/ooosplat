@@ -60,6 +60,7 @@ Windows 和 Apple Silicon macOS Alpha 均随应用提供 FFmpeg、FFprobe、COLM
 - 可在平台文件管理器中定位 `final.ply`，或将整个项目移入系统回收站。
 - 可拖动中央分界线调整左右面板宽度；右下角支持 80%–140% 整体界面缩放。
 - 支持中文、空格、长文件名和 UNC 项目路径。
+- 界面支持简体中文与英文即时切换；首次启动按系统语言自动选择，手动切换后会记住用户选择。
 
 ### Gaussian 编辑快捷键
 
@@ -137,7 +138,7 @@ sudo apt install ./OOOSplat-0.4.0-x64-linux.deb
 ## 安装与使用
 
 1. Windows 运行 `OOOSplat-0.4.0-x64-windows.exe`；Apple Silicon Mac 打开 `OOOSplat-0.4.0-arm64-macos.dmg` 并将 OOOSplat 拖入“应用程序”；Ubuntu 24.04 使用 `sudo apt install ./OOOSplat-0.4.0-x64-linux.deb`。
-2. 启动 OOOSplat，确认顶栏中的内置引擎状态正常。
+2. 启动 OOOSplat，确认顶栏中的内置引擎状态正常；可使用右上角的 `EN / 中文` 按钮即时切换界面语言。
 3. 在“01 创建新任务”的输入类型下拉栏选择“视频”或“图片”，再点击输入框选择视频文件或图片序列文件夹。
 4. 选择项目根目录；程序会记住上次使用的位置。
 5. 选择“快速”“均衡”或“精细”档位。
@@ -193,7 +194,26 @@ sudo apt install ./OOOSplat-0.4.0-x64-linux.deb
 ```text
 %LOCALAPPDATA%\SplatStudio\settings.json
 %LOCALAPPDATA%\SplatStudio\project-index.json
+%LOCALAPPDATA%\SplatStudio\telemetry.json
 ```
+
+## 匿名使用统计
+
+OOOSplat 默认开启匿名使用统计，用于了解稳定性和各阶段耗时。可在右上角 **设置 → 隐私** 中随时关闭，关闭后不再发送任何请求。
+
+会发送的内容：
+
+| 字段 | 说明 |
+| --- | --- |
+| 安装 ID | 首次启动生成的随机 UUID，不读取硬件序列号、MAC 地址或设备指纹 |
+| 应用版本、操作系统、CPU 架构 | 例如 `0.4.0` / `windows` / `x86_64` |
+| 事件名 | `daily_active`、`generation_started`、`generation_completed`、`generation_failed`、`pipeline_stage_completed`。`daily_active` 每天最多一次，应用升级后当天会再报一次 |
+| 质量档位与输入类型 | 枚举值，例如 `balanced` / `video`；图片序列输入报 `images` |
+| 阶段耗时与总耗时 | 毫秒 |
+| 帧数与视频时长 | 分桶值，不是原始数量 |
+| 失败阶段与错误码 | 枚举值，例如 `colmap_mapper_failed`；不含原始错误文本 |
+
+不会发送的内容：视频、图片、PLY 等任何素材；文件名、路径和项目名称；日志与命令输出；用户名或任何个人信息。
 
 ## 内置引擎
 

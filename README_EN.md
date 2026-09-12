@@ -60,6 +60,7 @@ See the [OOOSplat Roadmap](ROADMAP_EN.md) for planned work.
 - Reveal `final.ply` in the platform file manager or move the complete project to the system trash.
 - Resize the left and right panels by dragging the divider, and scale the full interface from 80% to 140%.
 - Support Chinese characters, spaces, long file names, and UNC project paths.
+- Switch instantly between the Simplified Chinese and English interfaces. The first launch follows the system language, and an explicit choice is remembered.
 
 ### Gaussian Editing Shortcuts
 
@@ -137,7 +138,7 @@ The `.deb` installs FFmpeg, FFprobe, and CPU COLMAP through Ubuntu's package man
 ## Installation and Use
 
 1. On Windows, run `OOOSplat-0.4.0-x64-windows.exe`. On an Apple Silicon Mac, open `OOOSplat-0.4.0-arm64-macos.dmg` and drag OOOSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./OOOSplat-0.4.0-x64-linux.deb`.
-2. Start OOOSplat and confirm that the bundled engine status in the top bar is healthy.
+2. Start OOOSplat and confirm that the bundled engine status in the top bar is healthy. Use the `EN / 中文` action in the upper-right corner to switch the interface language instantly.
 3. Under “01 Create New Task,” choose Video or Images from the input-type menu, then click the input field to select a video file or image-sequence folder.
 4. Choose the projects root; OOOSplat remembers the last location.
 5. Select the Fast, Balanced, or Detailed quality preset.
@@ -193,7 +194,26 @@ Application settings and the project index are stored in:
 ```text
 %LOCALAPPDATA%\SplatStudio\settings.json
 %LOCALAPPDATA%\SplatStudio\project-index.json
+%LOCALAPPDATA%\SplatStudio\telemetry.json
 ```
+
+## Anonymous Usage Statistics
+
+OOOSplat collects anonymous usage statistics by default to track stability and per-stage timings. Turn it off at any time under **Settings -> Privacy** in the top right; nothing is sent once it is off.
+
+What is sent:
+
+| Field | Description |
+| --- | --- |
+| Install ID | A random UUID generated on first launch. No hardware serial, MAC address, or device fingerprint is read |
+| App version, OS, CPU architecture | For example `0.4.0` / `windows` / `x86_64` |
+| Event name | `daily_active`, `generation_started`, `generation_completed`, `generation_failed`, `pipeline_stage_completed`. `daily_active` is sent at most once a day, and once more on the day the app version changes |
+| Quality preset and input type | Enumerated values such as `balanced` / `video`; an image-sequence input reports `images` |
+| Stage and total durations | Milliseconds |
+| Frame count and video duration | Bucketed values, not raw counts |
+| Failing stage and error code | Enumerated values such as `colmap_mapper_failed`; no raw error text |
+
+What is never sent: any source media, including videos, images, and PLY files; file names, paths, and project names; logs and command output; user names or any personal information.
 
 ## Bundled Engines
 
