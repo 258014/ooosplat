@@ -76,11 +76,25 @@ impl ColmapCliCapabilities {
         self.family
     }
 
-    fn feature_extraction_prefix(self) -> &'static str {
+    fn max_image_size_option(self) -> &'static str {
         match self.family {
-            ColmapCliFamily::Legacy39 => "--SiftExtraction.",
-            ColmapCliFamily::Modern4 => "--FeatureExtraction.",
+            ColmapCliFamily::Legacy39 => "--SiftExtraction.max_image_size",
+            // COLMAP 4.x split this one option into the FeatureExtraction
+            // namespace while the remaining SIFT knobs stayed under SiftExtraction.
+            ColmapCliFamily::Modern4 => "--FeatureExtraction.max_image_size",
         }
+    }
+
+    fn max_num_features_option(self) -> &'static str {
+        "--SiftExtraction.max_num_features"
+    }
+
+    fn estimate_affine_shape_option(self) -> &'static str {
+        "--SiftExtraction.estimate_affine_shape"
+    }
+
+    fn domain_size_pooling_option(self) -> &'static str {
+        "--SiftExtraction.domain_size_pooling"
     }
 
     fn feature_gpu_options(self) -> (&'static str, &'static str) {
@@ -170,15 +184,10 @@ pub async fn cli_capabilities(
     if let Some(cached) = cached_capabilities(&key) {
         return cached.ok_or_else(unsupported_cli_error);
     }
-    let detected = match (
-        command_help(executable, "feature_extractor", manager).await,
-        command_help(executable, "sequential_matcher", manager).await,
-    ) {
-        (Ok(feature_help), Ok(matching_help)) => {
-            detect_cli_family(&feature_help, &matching_help).map(ColmapCliCapabilities::from_family)
-        }
-        _ => None,
-    };
+    let feature_help = command_help(executable, "feature_extractor", manager).await?;
+    let matching_help = command_help(executable, "sequential_matcher", manager).await?;
+    let detected =
+        detect_cli_family(&feature_help, &matching_help).map(ColmapCliCapabilities::from_family);
     if let Ok(mut entries) = cache.entries.lock() {
         entries.insert(key, detected);
     }
@@ -317,7 +326,10 @@ fn feature_extraction_args(
     tuning: FeatureExtractionTuning,
 ) -> Vec<OsString> {
     let (use_gpu_option, gpu_index_option) = capabilities.feature_gpu_options();
-    let prefix = capabilities.feature_extraction_prefix();
+    let max_image_size_option = capabilities.max_image_size_option();
+    let max_num_features_option = capabilities.max_num_features_option();
+    let estimate_affine_shape_option = capabilities.estimate_affine_shape_option();
+    let domain_size_pooling_option = capabilities.domain_size_pooling_option();
     let mut args = vec![
         "feature_extractor".into(),
         "--database_path".into(),
@@ -348,13 +360,13 @@ fn feature_extraction_args(
     // - estimate_affine_shape and domain_size_pooling are expensive and only pay
     //   off for strongly viewpoint-dependent texture, so both stay off.
     args.extend([
-        format!("{prefix}max_image_size").into(),
+        max_image_size_option.into(),
         tuning.max_image_size.to_string().into(),
-        format!("{prefix}max_num_features").into(),
+        max_num_features_option.into(),
         tuning.max_num_features.to_string().into(),
-        format!("{prefix}estimate_affine_shape").into(),
+        estimate_affine_shape_option.into(),
         "0".into(),
-        format!("{prefix}domain_size_pooling").into(),
+        domain_size_pooling_option.into(),
         "0".into(),
     ]);
     args
@@ -477,9 +489,10 @@ pub async fn supports_global_mapper(executable: &Path, manager: &ProcessManager)
     {
         return value;
     }
-    let supported = command_help(executable, "global_mapper", manager)
-        .await
-        .is_ok();
+    let supported = match command_help(executable, "global_mapper", manager).await {
+        Ok(_) => true,
+        Err(_) => return false,
+    };
     if let Ok(mut cache) = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
         cache.insert(key, supported);
     }
@@ -579,16 +592,13 @@ mod tests {
             .any(|pair| pair == ["--FeatureExtraction.max_image_size", "1600"]));
         assert!(extraction
             .windows(2)
-            .any(|pair| pair == ["--FeatureExtraction.max_num_features", "8192"]));
+            .any(|pair| pair == ["--SiftExtraction.max_num_features", "8192"]));
         assert!(extraction
             .windows(2)
-            .any(|pair| pair == ["--FeatureExtraction.estimate_affine_shape", "0"]));
+            .any(|pair| pair == ["--SiftExtraction.estimate_affine_shape", "0"]));
         assert!(extraction
             .windows(2)
-            .any(|pair| pair == ["--FeatureExtraction.domain_size_pooling", "0"]));
-        assert!(!extraction
-            .iter()
-            .any(|arg| arg.starts_with("--SiftExtraction.")));
+            .any(|pair| pair == ["--SiftExtraction.domain_size_pooling", "0"]));
     }
 
     #[test]
@@ -629,7 +639,7 @@ mod tests {
             .any(|pair| pair == ["--FeatureExtraction.max_image_size", "1600"]));
         assert!(extraction
             .windows(2)
-            .any(|pair| pair == ["--FeatureExtraction.max_num_features", "8192"]));
+            .any(|pair| pair == ["--SiftExtraction.max_num_features", "8192"]));
         assert!(extraction
             .iter()
             .any(|arg| arg == "--ImageReader.camera_model"));
