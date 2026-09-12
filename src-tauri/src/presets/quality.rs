@@ -39,6 +39,17 @@ pub struct QualityPreset {
     pub sequential_overlap: u32,
     pub feature_max_image_size: u32,
     pub feature_max_num_features: u32,
+    /// Brush `--sh-degree`: spherical-harmonics order of the trained splats.
+    /// Lowering it speeds training up but drops view-dependent effects such as
+    /// reflections and highlights.
+    pub brush_sh_degree: u32,
+    /// Brush `--growth-stop-iter`: iteration after which densification stops, so
+    /// late iterations only refine the splats that already exist.
+    pub brush_growth_stop_iter: Option<usize>,
+    /// Brush `--refine-every`: interval between refinement/densification passes.
+    pub brush_refine_every: Option<usize>,
+    /// Brush `--max-splats`: upper bound on the number of gaussians.
+    pub brush_max_splats: Option<usize>,
 }
 
 impl Quality {
@@ -54,6 +65,15 @@ impl Quality {
                 sequential_overlap: 12,
                 feature_max_image_size: 1280,
                 feature_max_num_features: 8192,
+                // 60% of 8_000 steps: densification stops early and the remaining
+                // iterations refine an existing splat set.
+                brush_sh_degree: 1,
+                brush_growth_stop_iter: Some(4_800),
+                // Brush already defaults to 200 and ties this value to the number
+                // of images covering the scene, so leaving it unset avoids a
+                // detail loss the presets have no evidence to justify.
+                brush_refine_every: None,
+                brush_max_splats: None,
             },
             Self::Balanced => QualityPreset {
                 frame_retention_ratio: 0.50,
@@ -65,6 +85,11 @@ impl Quality {
                 sequential_overlap: 15,
                 feature_max_image_size: 1600,
                 feature_max_num_features: 8192,
+                // 60% of 15_000 steps.
+                brush_sh_degree: 1,
+                brush_growth_stop_iter: Some(9_000),
+                brush_refine_every: None,
+                brush_max_splats: None,
             },
             Self::High => QualityPreset {
                 frame_retention_ratio: 1.00,
@@ -76,6 +101,15 @@ impl Quality {
                 sequential_overlap: 20,
                 feature_max_image_size: 2000,
                 feature_max_num_features: 16384,
+                // The high tier keeps some view-dependent shading instead of
+                // dropping straight to degree 1.
+                brush_sh_degree: 2,
+                // 60% of 30_000 would be 18_000, which is *later* than Brush's own
+                // 15_000 default. Growth must only ever stop earlier, so this tier
+                // keeps the built-in default instead of extending densification.
+                brush_growth_stop_iter: None,
+                brush_refine_every: None,
+                brush_max_splats: None,
             },
         }
     }
@@ -151,6 +185,39 @@ mod tests {
         // Below 8192 features per image, pose accuracy measurably degrades.
         for quality in [Quality::Fast, Quality::Balanced, Quality::High] {
             assert!(quality.preset().feature_max_num_features >= 8192);
+        }
+    }
+
+    #[test]
+    fn brush_sh_degree_stays_within_brush_supported_range() {
+        for quality in [Quality::Fast, Quality::Balanced, Quality::High] {
+            let degree = quality.preset().brush_sh_degree;
+            // Brush defaults to 3; the presets only ever lower it.
+            assert!(
+                degree <= 3,
+                "{quality:?} raised the SH degree above Brush's default"
+            );
+        }
+    }
+
+    #[test]
+    fn growth_stop_iter_only_ever_shortens_densification() {
+        // Brush stops densification at step 15000 by default. A preset may ask for
+        // an earlier stop, but never a later one, which would extend the slowest
+        // part of training.
+        const BRUSH_DEFAULT_GROWTH_STOP_ITER: usize = 15_000;
+        for quality in [Quality::Fast, Quality::Balanced, Quality::High] {
+            let preset = quality.preset();
+            if let Some(stop) = preset.brush_growth_stop_iter {
+                assert!(
+                    stop <= BRUSH_DEFAULT_GROWTH_STOP_ITER,
+                    "{quality:?} would extend densification past Brush's default"
+                );
+                assert!(
+                    stop <= preset.brush_iterations,
+                    "{quality:?} stops growth after training already ended"
+                );
+            }
         }
     }
 

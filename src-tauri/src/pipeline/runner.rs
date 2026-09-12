@@ -1132,9 +1132,10 @@ impl PipelineRunner {
                 None,
                 true,
                 format!(
-                    "Brush 训练开始（使用可用图形后端）· {} iterations · 最大分辨率 {} · 预计约 {}",
+                    "Brush 训练开始（使用可用图形后端）· {} iterations · 最大分辨率 {} · SH 阶数 {} · 预计约 {}",
                     preset.brush_iterations,
                     preset.brush_max_resolution,
+                    preset.brush_sh_degree,
                     format_duration(estimated_brush_duration_ms)
                 ),
                 Some(0),
