@@ -1383,11 +1383,11 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
   const addReshootRegion = async () => {
     const crop = store.editing.crop;
     if (!crop) {
-      setReshootError("请先使用“球选择”或“盒选择”圈出模糊区域。");
+      setReshootError(t("reshoot.errorSelectFirst"));
       return;
     }
     if (findReshootRegion(reshootRegions.map((entry) => entry.region), crop) >= 0) {
-      setReshootError("该区域已在补拍清单中。请调整选择范围或移动相机后再加入，避免重复补拍同一区域。");
+      setReshootError(t("reshoot.errorDuplicate"));
       return;
     }
     const index = reshootRegions.length;
@@ -1398,7 +1398,7 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
     try {
       const projected = sceneApiRef.current?.projectToScreen(crop.center);
       const frame = await sceneApiRef.current?.captureReshootFrame();
-      if (!projected || !frame) throw new Error("无法获取当前视角的画面。");
+      if (!projected || !frame) throw new Error(t("reshoot.errorNoFrame"));
       // Screen pixels per model unit, so the highlight matches the selection size.
       const edgePoint: [number, number, number] = crop.kind === "sphere"
         ? [crop.center[0] + crop.radius, crop.center[1], crop.center[2]]
@@ -1412,19 +1412,19 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
         index,
         directions: shootingDirections(crop),
       });
-      if (!guideImage) throw new Error("无法生成补拍指引图。");
+      if (!guideImage) throw new Error(t("reshoot.errorNoGuide"));
       setReshootRegions((regions) => regions.map((item, position) => position === index ? { ...item, guideImage } : item));
     } catch (error) {
       // The region stays in the list: guidance text and the region geometry are
       // still usable without the annotated frame.
-      setReshootError(`区域 ${index + 1} 的指引图生成失败：${error instanceof Error ? error.message : String(error)}`);
+      setReshootError(t("reshoot.errorGuideFailed", { index: index + 1, detail: error instanceof Error ? error.message : String(error) }));
     } finally {
       setGuidePending(null);
     }
   };
   const startReshoot = async () => {
     if (!store.descriptor || reshootRegions.length === 0 || busy) {
-      setReshootError("请至少添加一个需要补拍的区域。");
+      setReshootError(t("reshoot.errorEmpty"));
       return;
     }
     await onStartReshoot(
@@ -1526,18 +1526,18 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning, onStartRes
         {mode === "adjust" && store.tool === "transform" && <TransformPanel transform={store.transform} onBegin={store.beginTransaction} onChange={store.setTransformLive} onCommit={store.commitTransaction} />}
         {mode === "adjust" && (store.tool === "sphere" || store.tool === "box") && <SelectionPanel crop={store.editing.crop} kind={store.tool} onBegin={store.beginCropTransaction} onChange={store.setCropLive} onCommit={store.commitCropTransaction} onEnable={() => { const tool = useGaussianTransformStore.getState().tool; if (tool === "sphere" || tool === "box") enableCrop(tool); }} />}
         {mode === "adjust" && (store.tool === "sphere" || store.tool === "box") && <div className="reshoot-guide-panel">
-          <strong>高清补拍区域</strong>
-          <p>用当前{store.tool === "sphere" ? "球选" : "盒选"}圈住模糊或细节不足的位置，然后加入补拍清单。同一区域只会记录一次。</p>
-          <button type="button" disabled={!store.editing.crop || busy || guidePending !== null} onClick={() => void addReshootRegion()}>{guidePending !== null ? "正在生成指引图" : "加入当前区域"}</button>
+          <strong>{t("reshoot.panelTitle")}</strong>
+          <p>{t("reshoot.panelHint", { tool: store.tool === "sphere" ? t("reshoot.kindSphere") : t("reshoot.kindBox") })}</p>
+          <button type="button" disabled={!store.editing.crop || busy || guidePending !== null} onClick={() => void addReshootRegion()}>{guidePending !== null ? t("reshoot.generatingGuide") : t("reshoot.addCurrent")}</button>
           {reshootRegions.length > 0 && <ol>{reshootRegions.map((entry, index) => <li key={regionKey(entry.region)}>
-            <div className="reshoot-guide-head"><b>区域 {index + 1}</b><span>{regionGeometryLabel(entry.region)}</span>
-              <button type="button" aria-label={`移除补拍区域 ${index + 1}`} onClick={() => setReshootRegions((regions) => regions.filter((_, item) => item !== index))}>移除</button>
+            <div className="reshoot-guide-head"><b>{t("reshoot.region", { index: index + 1 })}</b><span>{regionGeometryLabel(entry.region)}</span>
+              <button type="button" aria-label={t("reshoot.removeAria", { index: index + 1 })} onClick={() => setReshootRegions((regions) => regions.filter((_, item) => item !== index))}>{t("reshoot.remove")}</button>
             </div>
             {entry.guideImage
-              ? <a className="reshoot-guide-figure" href={entry.guideImage} target="_blank" rel="noreferrer" title="在新标签页查看指引图"><img src={entry.guideImage} alt={`区域 ${index + 1} 补拍方位指引`} /><span>箭头 = 补拍机位，指向该区域</span></a>
+              ? <a className="reshoot-guide-figure" href={entry.guideImage} target="_blank" rel="noreferrer" title={t("reshoot.viewGuideTitle")}><img src={entry.guideImage} alt={t("reshoot.guideImageAlt", { index: index + 1 })} /><span>{t("reshoot.arrowLegend")}</span></a>
               : guidePending === index
-                ? <p className="reshoot-guide-figure pending"><LoaderCircle className="spin" size={14} />正在生成方位指引图</p>
-                : <p className="reshoot-guide-figure missing">未生成指引图</p>}
+                ? <p className="reshoot-guide-figure pending"><LoaderCircle className="spin" size={14} />{t("reshoot.generatingDirection")}</p>
+                : <p className="reshoot-guide-figure missing">{t("reshoot.missingGuide")}</p>}
             <p className="reshoot-guide-text">{entry.guidance}</p>
           </li>)}</ol>}
           {reshootError && <p className="reshoot-guide-error">{reshootError}</p>}

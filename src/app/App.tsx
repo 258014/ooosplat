@@ -533,13 +533,13 @@ export function App() {
       </Suspense>
       {reshootInputMenuOpen && <div className="reshoot-input-backdrop" role="dialog" aria-modal="true" aria-labelledby="reshoot-input-title">
         <section className="reshoot-input-dialog">
-          <h2 id="reshoot-input-title">导入高清补拍素材</h2>
-          <p>补拍素材会复制到新的派生项目，与原始输入画面融合后重新运行 COLMAP 和 Brush。原项目及其 final.ply 不会被覆盖。</p>
+          <h2 id="reshoot-input-title">{t("reshoot.importTitle")}</h2>
+          <p>{t("reshoot.importHint")}</p>
           <div className="reshoot-input-options">
-            <button type="button" onClick={() => void chooseReshootInput("video")}><Clapperboard size={18} /><strong>选择补拍视频</strong><small>MP4 或 MOV</small></button>
-            <button type="button" onClick={() => void chooseReshootInput("images")}><Images size={18} /><strong>选择高清图片序列</strong><small>JPG、JPEG 或 PNG 文件夹</small></button>
+            <button type="button" onClick={() => void chooseReshootInput("video")}><Clapperboard size={18} /><strong>{t("reshoot.chooseVideo")}</strong><small>{t("reshoot.chooseVideoHint")}</small></button>
+            <button type="button" onClick={() => void chooseReshootInput("images")}><Images size={18} /><strong>{t("reshoot.chooseImages")}</strong><small>{t("reshoot.chooseImagesHint")}</small></button>
           </div>
-          <button type="button" className="reshoot-input-cancel" onClick={() => { setReshootInputMenuOpen(false); setPendingReshoot(null); }}>取消</button>
+          <button type="button" className="reshoot-input-cancel" onClick={() => { setReshootInputMenuOpen(false); setPendingReshoot(null); }}>{t("common.cancel")}</button>
         </section>
       </div>}
     </main>;

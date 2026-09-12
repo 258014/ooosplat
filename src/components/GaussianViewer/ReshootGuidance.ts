@@ -1,4 +1,9 @@
+import { getCurrentLocale, translate, type TranslationKey, type TranslationParams } from "../../i18n";
 import type { GaussianCrop } from "../../types/pipeline";
+
+// The guidance is built outside React, so it resolves the active locale directly,
+// the same way the viewer's video-export errors do.
+const t = (key: TranslationKey, params?: TranslationParams) => translate(getCurrentLocale(), key, params);
 
 export type ReshootRegion = Exclude<GaussianCrop, null>;
 
@@ -59,10 +64,10 @@ export function findReshootRegion(regions: ReshootRegion[], region: ReshootRegio
 const format = (value: number) => value.toFixed(2);
 
 export function regionGeometryLabel(region: ReshootRegion): string {
-  const center = `中心 (${region.center.map(format).join(", ")})`;
+  const center = t("reshoot.geometryCenter", { values: region.center.map(format).join(", ") });
   return region.kind === "sphere"
-    ? `球选 · ${center} · 半径 ${format(region.radius)}`
-    : `盒选 · ${center} · 尺寸 (${region.size.map(format).join(", ")})`;
+    ? t("reshoot.geometrySphere", { center, radius: format(region.radius) })
+    : t("reshoot.geometryBox", { center, size: region.size.map(format).join(", ") });
 }
 
 /**
@@ -71,9 +76,10 @@ export function regionGeometryLabel(region: ReshootRegion): string {
  */
 export function reshootGuidance(region: ReshootRegion, index: number): string {
   const geometry = regionGeometryLabel(region);
-  return region.kind === "sphere"
-    ? `区域 ${index + 1}｜${geometry}｜绕该区域缓慢环拍两周：第一周低角度、第二周抬高约 30°，每圈至少 12 个机位，始终让该区域位于画面中央并保留前景与背景两层视差。`
-    : `区域 ${index + 1}｜${geometry}｜从正面、左侧、右侧与上方各补拍一组高清画面，相邻机位间隔约 30°；避免仅原地变焦或只沿一个方向平移。`;
+  return t(region.kind === "sphere" ? "reshoot.guidanceSphere" : "reshoot.guidanceBox", {
+    index: index + 1,
+    geometry,
+  });
 }
 
 export function reshootRegionsGuidance(regions: ReshootRegion[]): string[] {
@@ -84,26 +90,26 @@ export function reshootRegionsGuidance(regions: ReshootRegion[]): string[] {
 export function shootingDirections(region: ReshootRegion): Array<{ angleDeg: number; label: string }> {
   if (region.kind === "sphere") {
     return [
-      { angleDeg: -90, label: "正前低角度" },
-      { angleDeg: -45, label: "右前低角度" },
-      { angleDeg: 0, label: "右侧低角度" },
-      { angleDeg: 45, label: "右后低角度" },
-      { angleDeg: 90, label: "正后低角度" },
-      { angleDeg: 135, label: "左后低角度" },
-      { angleDeg: 180, label: "左侧低角度" },
-      { angleDeg: -135, label: "左前低角度" },
-      { angleDeg: -90, label: "正前抬高 30°" },
-      { angleDeg: 0, label: "右侧抬高 30°" },
-      { angleDeg: 90, label: "正后抬高 30°" },
-      { angleDeg: 180, label: "左侧抬高 30°" },
+      { angleDeg: -90, label: t("reshoot.dirFrontLow") },
+      { angleDeg: -45, label: t("reshoot.dirFrontRightLow") },
+      { angleDeg: 0, label: t("reshoot.dirRightLow") },
+      { angleDeg: 45, label: t("reshoot.dirBackRightLow") },
+      { angleDeg: 90, label: t("reshoot.dirBackLow") },
+      { angleDeg: 135, label: t("reshoot.dirBackLeftLow") },
+      { angleDeg: 180, label: t("reshoot.dirLeftLow") },
+      { angleDeg: -135, label: t("reshoot.dirFrontLeftLow") },
+      { angleDeg: -90, label: t("reshoot.dirFrontRaised") },
+      { angleDeg: 0, label: t("reshoot.dirRightRaised") },
+      { angleDeg: 90, label: t("reshoot.dirBackRaised") },
+      { angleDeg: 180, label: t("reshoot.dirLeftRaised") },
     ];
   }
   return [
-    { angleDeg: -90, label: "正面" },
-    { angleDeg: 180, label: "左侧" },
-    { angleDeg: 0, label: "右侧" },
-    { angleDeg: -45, label: "右前 30°" },
-    { angleDeg: -135, label: "左前 30°" },
+    { angleDeg: -90, label: t("reshoot.dirFront") },
+    { angleDeg: 180, label: t("reshoot.dirLeft") },
+    { angleDeg: 0, label: t("reshoot.dirRight") },
+    { angleDeg: -45, label: t("reshoot.dirFrontRight") },
+    { angleDeg: -135, label: t("reshoot.dirFrontLeft") },
   ];
 }
 
@@ -203,7 +209,10 @@ export function guideMarkerInViewport(
 }
 
 export function guideCaption(region: ReshootRegion, index: number): string {
-  return `区域 ${index + 1} · ${region.kind === "sphere" ? "球选" : "盒选"} · 箭头 = 补拍机位（箭头指向被补拍区域）`;
+  return t("reshoot.caption", {
+    index: index + 1,
+    kind: region.kind === "sphere" ? t("reshoot.kindSphere") : t("reshoot.kindBox"),
+  });
 }
 
 /**
