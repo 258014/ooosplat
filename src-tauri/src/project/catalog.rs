@@ -33,7 +33,7 @@ pub async fn runtime_samples() -> Vec<RuntimeSample> {
             continue;
         };
         let state_bytes = tokio::fs::read(item.path.join("state.json")).await.ok();
-        let Some(extracted_frames) = runtime_sample_frame_count(
+        let Some(mapped_frames) = runtime_sample_frame_count(
             state_bytes.as_deref(),
             metadata.output.as_ref().map(|output| output.input_images),
         ) else {
@@ -41,7 +41,7 @@ pub async fn runtime_samples() -> Vec<RuntimeSample> {
         };
         samples.push(RuntimeSample {
             quality: metadata.quality,
-            extracted_frames,
+            mapped_frames,
             duration_ms,
         });
         if samples.len() == 20 {
@@ -51,6 +51,12 @@ pub async fn runtime_samples() -> Vec<RuntimeSample> {
     samples
 }
 
+/// Images this run actually fed to COLMAP.
+///
+/// The estimate is calibrated against the same basis, so the filtered count wins
+/// over the pre-filter extraction count whenever the smart filter has run. The
+/// pipeline output's `input_images` is the count the validator measured inside
+/// the frame directory, which is already post-filter.
 fn runtime_sample_frame_count(
     state_bytes: Option<&[u8]>,
     output_frames: Option<u64>,
@@ -58,9 +64,14 @@ fn runtime_sample_frame_count(
     state_bytes
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
         .and_then(|state| {
-            state
-                .pointer("/frames/extractedFrames")
-                .and_then(|value| value.as_u64())
+            ["/frames/filteredFrames", "/frames/extractedFrames"]
+                .into_iter()
+                .find_map(|pointer| {
+                    state
+                        .pointer(pointer)
+                        .and_then(|value| value.as_u64())
+                        .filter(|count| *count > 0)
+                })
         })
         .or(output_frames)
         .filter(|count| *count > 0)
@@ -455,6 +466,19 @@ mod tests {
         let current_state = br#"{"frames":{"extractedFrames":320}}"#;
         assert_eq!(
             runtime_sample_frame_count(Some(current_state), Some(533)),
+            Some(320)
+        );
+        // Calibration compares against the post-filter count, so the filtered
+        // value must win over the raw extraction count.
+        let filtered_state = br#"{"frames":{"extractedFrames":320,"filteredFrames":96}}"#;
+        assert_eq!(
+            runtime_sample_frame_count(Some(filtered_state), Some(533)),
+            Some(96)
+        );
+        // A zero filtered count must not shadow a usable extraction count.
+        let zero_filtered = br#"{"frames":{"extractedFrames":320,"filteredFrames":0}}"#;
+        assert_eq!(
+            runtime_sample_frame_count(Some(zero_filtered), Some(533)),
             Some(320)
         );
         assert_eq!(runtime_sample_frame_count(None, Some(0)), None);

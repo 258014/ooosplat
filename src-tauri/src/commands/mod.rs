@@ -19,7 +19,7 @@ use crate::{
     pipeline::{
         estimate::{
             estimate_runtime_for_images_with_backend, estimate_runtime_with_backend,
-            RuntimeEstimate,
+            estimate_runtime_with_backend_and_mapped_frames, RuntimeEstimate,
         },
         runner::{PipelineResult, PipelineRunner},
     },
@@ -275,10 +275,19 @@ pub async fn estimate_project_runtime(
     let saved_plan = state.frames.as_ref().map(|frames| FramePlan {
         retention_ratio: frames.retention_ratio,
         sampling_fps: frames.sampling_fps,
-        estimated_frames: frames
-            .extracted_frames
-            .unwrap_or(frames.estimated_frames)
-            .max(1),
+        estimated_frames: frames.estimated_frames.max(1),
+    });
+    // Smart filtering only applies to video runs, and once it has run the real
+    // post-filter count is a measurement rather than something to predict.
+    let observed_mapped_frames = state.frames.as_ref().and_then(|frames| {
+        if metadata.quality.preset().enable_smart_filter
+            && metadata.input_type == ProjectInputType::Video
+        {
+            frames.filtered_frames
+        } else {
+            frames.extracted_frames
+        }
+        .filter(|count| *count > 0)
     });
     let samples = catalog::runtime_samples().await;
     let mut estimate = match metadata.input_type {
@@ -304,7 +313,22 @@ pub async fn estimate_project_runtime(
                     .mapper_backend
                     .backend(global_available)
             });
-            estimate_runtime_with_backend(&video, &plan, metadata.quality, &samples, backend)
+            match observed_mapped_frames {
+                Some(mapped_frames) => estimate_runtime_with_backend_and_mapped_frames(
+                    &video,
+                    metadata.quality,
+                    &samples,
+                    backend,
+                    mapped_frames,
+                ),
+                None => estimate_runtime_with_backend(
+                    &video,
+                    &plan,
+                    metadata.quality,
+                    &samples,
+                    backend,
+                ),
+            }
         }
         ProjectInputType::Images => {
             let image_sequence = match state.image_sequence.clone() {

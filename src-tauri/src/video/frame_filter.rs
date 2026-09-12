@@ -73,6 +73,27 @@ impl FrameFilterConfig {
     }
 }
 
+/// Expected number of frames the filter keeps out of `extracted` analysed frames.
+///
+/// `decide_windows` splits the analysed frames into `window_size` chunks and keeps
+/// up to `keep_per_window` of each — backfilling to that quota, and always keeping
+/// at least one frame per window. The count is therefore predictable before the
+/// frames exist, which is what lets runtime estimates use the number of images
+/// COLMAP will actually process instead of the pre-filter extraction count.
+///
+/// The second-layer gap backfill can add a few frames when kept frames end up more
+/// than one window apart; once filtering has run, callers should prefer the real
+/// `FilterOutcome::kept_frames`.
+pub fn expected_kept_frames(extracted: u64, config: &FrameFilterConfig) -> u64 {
+    let extracted = extracted.max(1);
+    let window_size = config.window_size.max(1) as u64;
+    let keep = config.keep_per_window.max(1) as u64;
+    let full_windows = extracted / window_size;
+    let remainder = extracted % window_size;
+    let expected = full_windows * keep + remainder.min(keep);
+    expected.clamp(1, extracted)
+}
+
 /// Stable identity for the filtering inputs, including strategy semantics.
 pub fn filter_config_hash(config: &FrameFilterConfig, source_frames: u64) -> String {
     let canonical = format!(
@@ -778,6 +799,50 @@ mod tests {
         assert_eq!(result.kept_frames, 2 * config().keep_per_window);
         assert_eq!(result.forced_keeps, config().keep_per_window);
         assert_eq!(result.rejected_exposure, 10 - config().keep_per_window);
+    }
+
+    #[test]
+    fn predicted_kept_frames_match_the_real_filter() {
+        // The predictor is used to size runtime estimates before extraction runs,
+        // so it must agree with the filter's own window quota.
+        for extracted in [10_u32, 20, 30, 35] {
+            let input = tempdir().unwrap();
+            let output = tempdir().unwrap();
+            save_frames(input.path(), extracted, &[]);
+            let result = filter_frames(input.path(), output.path(), &config()).unwrap();
+            assert_eq!(
+                result.kept_frames as u64,
+                expected_kept_frames(extracted as u64, &config()),
+                "mismatch for {extracted} extracted frames"
+            );
+        }
+    }
+
+    #[test]
+    fn predicted_kept_frames_respect_the_window_quota() {
+        let config = config();
+        // Two full windows keep two quotas.
+        assert_eq!(
+            expected_kept_frames(20, &config),
+            2 * config.keep_per_window as u64
+        );
+        // A partial window keeps at most one quota and never fewer than one frame.
+        assert_eq!(
+            expected_kept_frames(5, &config),
+            config.keep_per_window as u64
+        );
+        assert_eq!(expected_kept_frames(1, &config), 1);
+        // A window smaller than the quota keeps every frame it has.
+        let tiny = FrameFilterConfig {
+            window_size: 10,
+            keep_per_window: 8,
+            ..config
+        };
+        assert_eq!(expected_kept_frames(4, &tiny), 4);
+        // The prediction can never exceed the frames that actually exist.
+        for extracted in [1_u64, 3, 7, 99, 1_000] {
+            assert!(expected_kept_frames(extracted, &config) <= extracted);
+        }
     }
 
     #[test]

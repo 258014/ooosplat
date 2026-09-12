@@ -3,11 +3,29 @@ use serde::Serialize;
 use crate::{
     engines::MapperBackend,
     presets::Quality,
-    video::{FramePlan, VideoInfo},
+    video::{expected_kept_frames, FramePlan, VideoInfo},
 };
 
 const INCREMENTAL_RECONSTRUCTION_COEFFICIENT: f64 = 176.0;
 const GLOBAL_RECONSTRUCTION_COEFFICIENT: f64 = 40.0;
+
+/// Number of images a video run actually hands to COLMAP.
+///
+/// Smart frame selection oversamples the extraction by 1.5x and the filter then
+/// keeps a bounded number of frames per window, so neither the matcher nor the
+/// mapper ever sees `plan.estimated_frames`. Every component that scales with
+/// images has to be estimated from the post-filter count, otherwise the estimate
+/// is inflated by the oversampling factor and by the rejected frames.
+///
+/// Image-sequence inputs skip smart filtering entirely (`smart_filter_enabled`
+/// requires a video), so this rule only applies to video runs.
+pub fn expected_mapped_frames(plan: &FramePlan, quality: Quality) -> u64 {
+    let preset = quality.preset();
+    if !preset.enable_smart_filter {
+        return plan.estimated_frames.max(1);
+    }
+    expected_kept_frames(plan.estimated_frames, &preset.smart_filter_config)
+}
 
 fn reconstruction_estimate_ms(frames: u64, backend: MapperBackend) -> f64 {
     let frame_count = frames.max(1) as f64;
@@ -23,7 +41,9 @@ fn reconstruction_estimate_ms(frames: u64, backend: MapperBackend) -> f64 {
 #[derive(Debug, Clone)]
 pub struct RuntimeSample {
     pub quality: Quality,
-    pub extracted_frames: u64,
+    /// Images this historical run actually fed to COLMAP, measured on the same
+    /// basis as the estimate so the calibration ratio stays meaningful.
+    pub mapped_frames: u64,
     pub duration_ms: u64,
 }
 
@@ -62,9 +82,29 @@ pub fn estimate_runtime_with_backend(
     samples: &[RuntimeSample],
     backend: MapperBackend,
 ) -> RuntimeEstimate {
+    estimate_runtime_with_backend_and_mapped_frames(
+        video,
+        quality,
+        samples,
+        backend,
+        expected_mapped_frames(plan, quality),
+    )
+}
+
+/// Estimates from the *observed* number of images a run fed to COLMAP.
+///
+/// Use this when a pipeline already recorded its real frame counts: the count is
+/// a measurement, not a prediction, so it must not be re-derived from the plan.
+pub fn estimate_runtime_with_backend_and_mapped_frames(
+    video: &VideoInfo,
+    quality: Quality,
+    samples: &[RuntimeSample],
+    backend: MapperBackend,
+    mapped_frames: u64,
+) -> RuntimeEstimate {
     estimate_runtime_for_input(
         video.total_frames,
-        plan,
+        mapped_frames,
         quality,
         samples,
         backend,
@@ -94,8 +134,15 @@ pub fn estimate_runtime_for_images_with_backend(
     samples: &[RuntimeSample],
     backend: MapperBackend,
 ) -> RuntimeEstimate {
-    let mut estimate =
-        estimate_runtime_for_input(image_count, plan, quality, samples, backend, "输入图片");
+    // Image sequences are never filtered, so every input image reaches COLMAP.
+    let mut estimate = estimate_runtime_for_input(
+        image_count,
+        plan.estimated_frames.max(1),
+        quality,
+        samples,
+        backend,
+        "输入图片",
+    );
     estimate.basis = if estimate.sample_count == 0 {
         format!("根据 {image_count} 张输入图片和质量档位估算；完成任务后会自动校准")
     } else {
@@ -109,16 +156,17 @@ pub fn estimate_runtime_for_images_with_backend(
 
 fn estimate_runtime_for_input(
     source_count: u64,
-    plan: &FramePlan,
+    mapped_frames: u64,
     quality: Quality,
     samples: &[RuntimeSample],
     backend: MapperBackend,
     _source_label: &str,
 ) -> RuntimeEstimate {
-    let base = base_estimate_ms_with_backend(plan.estimated_frames, quality, backend);
+    let mapped_frames = mapped_frames.max(1);
+    let base = base_estimate_ms_with_backend(mapped_frames, quality, backend);
     let valid_samples = samples
         .iter()
-        .filter(|sample| sample.duration_ms >= 10_000 && sample.extracted_frames > 0)
+        .filter(|sample| sample.duration_ms >= 10_000 && sample.mapped_frames > 0)
         .collect::<Vec<_>>();
     let same_quality = valid_samples
         .iter()
@@ -129,8 +177,8 @@ fn estimate_runtime_for_input(
         .iter()
         .copied()
         .filter(|sample| {
-            let smaller = sample.extracted_frames.min(plan.estimated_frames).max(1) as f64;
-            let larger = sample.extracted_frames.max(plan.estimated_frames).max(1) as f64;
+            let smaller = sample.mapped_frames.min(mapped_frames).max(1) as f64;
+            let larger = sample.mapped_frames.max(mapped_frames).max(1) as f64;
             larger / smaller <= 1.25
         })
         .collect::<Vec<_>>();
@@ -145,7 +193,7 @@ fn estimate_runtime_for_input(
         .into_iter()
         .map(|sample| {
             let expected =
-                base_estimate_ms_with_backend(sample.extracted_frames, sample.quality, backend);
+                base_estimate_ms_with_backend(sample.mapped_frames, sample.quality, backend);
             (sample.duration_ms as f64 / expected.max(1) as f64).clamp(0.15, 5.0)
         })
         .collect::<Vec<_>>();
@@ -167,13 +215,13 @@ fn estimate_runtime_for_input(
         sample_count,
         basis: if sample_count == 0 {
             format!(
-                "根据输入 {} 总帧、预计处理 {} 帧和质量档位估算；完成任务后会自动校准",
-                source_count, plan.estimated_frames
+                "根据输入 {} 总帧、实际进入 COLMAP 的 {} 帧和质量档位估算；完成任务后会自动校准",
+                source_count, mapped_frames
             )
         } else {
             format!(
-                "根据输入 {} 总帧、预计处理 {} 帧、质量档位和本机 {sample_count} 个{calibration_label}任务校准",
-                source_count, plan.estimated_frames,
+                "根据输入 {} 总帧、实际进入 COLMAP 的 {} 帧、质量档位和本机 {sample_count} 个{calibration_label}任务校准",
+                source_count, mapped_frames,
             )
         },
     }
@@ -185,36 +233,12 @@ fn base_estimate_ms(frames: u64, quality: Quality) -> u64 {
 }
 
 fn base_estimate_ms_with_backend(frames: u64, quality: Quality, backend: MapperBackend) -> u64 {
-    base_estimate_ms_with_preparation_and_backend(frames, frames, quality, backend)
-}
-
-#[cfg(test)]
-fn base_estimate_ms_with_preparation(
-    reconstruction_frames: u64,
-    preparation_frames: u64,
-    quality: Quality,
-) -> u64 {
-    base_estimate_ms_with_preparation_and_backend(
-        reconstruction_frames,
-        preparation_frames,
-        quality,
-        MapperBackend::Global,
-    )
-}
-
-fn base_estimate_ms_with_preparation_and_backend(
-    reconstruction_frames: u64,
-    preparation_frames: u64,
-    quality: Quality,
-    backend: MapperBackend,
-) -> u64 {
-    let reconstruction_count = reconstruction_frames.max(1) as f64;
-    let preparation_count = preparation_frames.max(1) as f64;
-
-    // Preparation follows the actual filtered input count. The reconstruction
-    // complexity model intentionally keeps using the original planned count.
-    let preparation_ms = 8_000.0 + preparation_count * 55.0;
-    let reconstruction_ms = reconstruction_estimate_ms(reconstruction_count as u64, backend);
+    let mapped_count = frames.max(1) as f64;
+    // Every component scales with the images that actually reach COLMAP: frame
+    // extraction, feature extraction, matching and the mapper all consume the
+    // same post-filter frame set.
+    let preparation_ms = 8_000.0 + mapped_count * 55.0;
+    let reconstruction_ms = reconstruction_estimate_ms(mapped_count as u64, backend);
     let brush_ms = estimate_brush_stage_ms(quality) as f64;
     (preparation_ms + reconstruction_ms + brush_ms).round() as u64
 }
@@ -239,7 +263,8 @@ pub(crate) fn estimate_calibrated_brush_stage_ms(
     backend: MapperBackend,
 ) -> u64 {
     let base_total_ms =
-        base_estimate_ms_with_backend(plan.estimated_frames, quality, backend).max(1);
+        base_estimate_ms_with_backend(expected_mapped_frames(plan, quality), quality, backend)
+            .max(1);
     let calibrated_total_ms =
         estimate_runtime_with_backend(video, plan, quality, samples, backend).estimated_ms;
     let calibration = calibrated_total_ms as f64 / base_total_ms as f64;
@@ -257,9 +282,15 @@ pub(crate) fn estimate_calibrated_brush_stage_ms_for_images(
 ) -> u64 {
     let base_total_ms =
         base_estimate_ms_with_backend(plan.estimated_frames, quality, backend).max(1);
-    let calibrated_total_ms =
-        estimate_runtime_for_input(image_count, plan, quality, samples, backend, "输入图片")
-            .estimated_ms;
+    let calibrated_total_ms = estimate_runtime_for_input(
+        image_count,
+        plan.estimated_frames.max(1),
+        quality,
+        samples,
+        backend,
+        "输入图片",
+    )
+    .estimated_ms;
     let calibration = calibrated_total_ms as f64 / base_total_ms as f64;
     (estimate_brush_stage_ms(quality) as f64 * calibration)
         .round()
@@ -292,6 +323,15 @@ mod tests {
         }
     }
 
+    /// A frame plan whose planned extraction count is the value under test.
+    fn plan_with_frames(estimated_frames: u64) -> FramePlan {
+        FramePlan {
+            retention_ratio: 0.5,
+            sampling_fps: 30.0,
+            estimated_frames,
+        }
+    }
+
     #[test]
     fn mapper_backend_estimate_prefers_global_complexity() {
         let global = base_estimate_ms_with_backend(2_000, Quality::Balanced, MapperBackend::Global);
@@ -310,10 +350,36 @@ mod tests {
     }
 
     #[test]
-    fn filtered_count_changes_only_the_preparation_component() {
-        let full = base_estimate_ms_with_preparation(100, 100, Quality::Balanced);
-        let filtered = base_estimate_ms_with_preparation(100, 40, Quality::Balanced);
-        assert_eq!(full - filtered, 60 * 55);
+    fn estimates_use_the_post_filter_frame_count() {
+        let plan = plan_with_frames(533);
+        let quality = Quality::Balanced;
+        let mapped = expected_mapped_frames(&plan, quality);
+        // Smart frame selection oversamples before filtering, so the frames that
+        // reach COLMAP are strictly fewer than the planned extraction count.
+        assert!(mapped < plan.estimated_frames);
+        assert_eq!(
+            mapped,
+            expected_kept_frames(plan.estimated_frames, &quality.preset().smart_filter_config)
+        );
+
+        let estimate = estimate_runtime(&video(), &plan, quality, &[]);
+        assert_eq!(
+            estimate.estimated_ms,
+            base_estimate_ms_with_backend(mapped, quality, MapperBackend::Global)
+        );
+        assert!(estimate.basis.contains("实际进入 COLMAP"));
+    }
+
+    #[test]
+    fn higher_quality_presets_map_more_frames() {
+        let plan = plan_with_frames(600);
+        let fast = expected_mapped_frames(&plan, Quality::Fast);
+        let balanced = expected_mapped_frames(&plan, Quality::Balanced);
+        let high = expected_mapped_frames(&plan, Quality::High);
+        // keep_per_window is 2/3/4 across the presets, so the frames that reach
+        // COLMAP must grow with the quality tier.
+        assert!(fast < balanced && balanced < high);
+        assert!(high <= plan.estimated_frames);
     }
 
     #[test]
@@ -329,15 +395,12 @@ mod tests {
     #[test]
     fn brush_stage_estimate_uses_the_same_local_history_calibration() {
         let video = video();
-        let plan = FramePlan {
-            retention_ratio: 0.5,
-            sampling_fps: 30.0,
-            estimated_frames: 533,
-        };
-        let base_total = base_estimate_ms(plan.estimated_frames, Quality::Balanced);
+        let plan = plan_with_frames(533);
+        let mapped = expected_mapped_frames(&plan, Quality::Balanced);
+        let base_total = base_estimate_ms(mapped, Quality::Balanced);
         let sample = RuntimeSample {
             quality: Quality::Balanced,
-            extracted_frames: plan.estimated_frames,
+            mapped_frames: mapped,
             duration_ms: base_total * 2,
         };
 
@@ -361,7 +424,7 @@ mod tests {
         };
         let sample = RuntimeSample {
             quality: Quality::Fast,
-            extracted_frames: 226,
+            mapped_frames: 226,
             duration_ms: 858_613,
         };
         let estimate = estimate_runtime(
@@ -379,25 +442,22 @@ mod tests {
     #[test]
     fn same_quality_samples_take_priority_and_use_the_median() {
         let video = video();
-        let plan = FramePlan {
-            retention_ratio: 0.5,
-            sampling_fps: 30.0,
-            estimated_frames: 533,
-        };
+        let plan = plan_with_frames(533);
+        let mapped = expected_mapped_frames(&plan, Quality::Balanced);
         let samples = [
             RuntimeSample {
                 quality: Quality::Balanced,
-                extracted_frames: 533,
-                duration_ms: base_estimate_ms(533, Quality::Balanced) * 2,
+                mapped_frames: mapped,
+                duration_ms: base_estimate_ms(mapped, Quality::Balanced) * 2,
             },
             RuntimeSample {
                 quality: Quality::Fast,
-                extracted_frames: 320,
+                mapped_frames: 320,
                 duration_ms: 374_000,
             },
             RuntimeSample {
                 quality: Quality::High,
-                extracted_frames: 416,
+                mapped_frames: 416,
                 duration_ms: 10_464_000,
             },
         ];
@@ -405,7 +465,7 @@ mod tests {
         assert_eq!(estimate.sample_count, 1);
         assert_eq!(
             estimate.estimated_ms,
-            base_estimate_ms(533, Quality::Balanced) * 2
+            base_estimate_ms(mapped, Quality::Balanced) * 2
         );
         assert!(estimate.basis.contains("1 个同档位、相近帧数任务"));
     }
@@ -413,31 +473,33 @@ mod tests {
     #[test]
     fn nearby_frame_counts_do_not_mix_unrelated_runs() {
         let video = video();
-        let plan = FramePlan {
-            retention_ratio: 0.3,
-            sampling_fps: 9.0,
-            estimated_frames: 320,
-        };
+        let plan = plan_with_frames(533);
+        let mapped = expected_mapped_frames(&plan, Quality::Fast);
+        let base = base_estimate_ms(mapped, Quality::Fast);
+        // Durations are taken relative to the base model so the calibration ratios
+        // stay inside the clamp and the median is exactly 1.5.
         let samples = [
             RuntimeSample {
                 quality: Quality::Fast,
-                extracted_frames: 320,
-                duration_ms: 840_000,
+                mapped_frames: mapped,
+                duration_ms: base,
             },
             RuntimeSample {
                 quality: Quality::Fast,
-                extracted_frames: 320,
-                duration_ms: 960_000,
+                mapped_frames: mapped,
+                duration_ms: base * 2,
             },
             RuntimeSample {
                 quality: Quality::Fast,
-                extracted_frames: 506,
-                duration_ms: 374_000,
+                mapped_frames: mapped * 4,
+                duration_ms: base * 2,
             },
         ];
         let estimate = estimate_runtime(&video, &plan, Quality::Fast, &samples);
+        // The far run is >25% away, so it must not join the calibration set: had
+        // it been included the median ratio would be 2.0, not 1.5.
         assert_eq!(estimate.sample_count, 2);
-        assert_eq!(estimate.estimated_ms, 900_000);
+        assert_eq!(estimate.estimated_ms, (base as f64 * 1.5).round() as u64);
         assert!(estimate.basis.contains("相近帧数"));
     }
 }
