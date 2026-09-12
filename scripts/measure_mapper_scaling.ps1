@@ -113,6 +113,10 @@ $measurements = @()
 # Must be an array up front: in PowerShell `$null += "text"` yields a String, so
 # every skipped entry would silently collapse into one concatenated line.
 $failures = @()
+$csvPath = Join-Path $OutputDir 'mapper_scaling.csv'
+if (Test-Path -LiteralPath $csvPath) {
+    Remove-Item -LiteralPath $csvPath -Force
+}
 foreach ($level in $Levels) {
     $stride = Get-Stride -Total $allFrames.Count -Target $level
     $levelDir = Join-Path $OutputDir ("n{0}" -f $level)
@@ -191,22 +195,24 @@ foreach ($level in $Levels) {
             ($sorted[$sorted.Count / 2 - 1] + $sorted[$sorted.Count / 2]) / 2
         }
         Write-Host ("  {0,-15} median {1,10:N0} ms over {2} run(s)" -f $backend, $median, $times.Count)
-        $measurements += [pscustomobject]@{
+        $measurement = [pscustomobject]@{
             Frames     = $frameCount
             Backend    = $backend
             MedianMs   = [math]::Round($median, 1)
             Runs       = $times.Count
             Registered = $registered
         }
+        $measurements += $measurement
+        # Recorded as it is produced: a sweep of many levels can run for a long
+        # time, and an interrupted run must not lose the levels already measured.
+        $measurement | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8 `
+            -Append
     }
 }
 
 if ($measurements.Count -eq 0) {
     throw "No successful mapper measurements; nothing to fit."
 }
-
-$csvPath = Join-Path $OutputDir 'mapper_scaling.csv'
-$measurements | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
 
 # Log-log least squares on t = a * n^b  =>  ln t = ln a + b ln n
 function Get-PowerFit {
