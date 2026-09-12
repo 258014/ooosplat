@@ -818,6 +818,14 @@ impl PipelineRunner {
 
         let backend_label = if acceleration.use_gpu() { "GPU" } else { "CPU" };
         let gpu_index = acceleration.gpu_index();
+        let preset = quality.preset();
+        let extraction_tuning = colmap::FeatureExtractionTuning {
+            max_image_size: preset.feature_max_image_size,
+            max_num_features: preset.feature_max_num_features,
+        };
+        let matching_tuning = colmap::SequentialMatchingTuning {
+            overlap: preset.sequential_overlap,
+        };
         if state.features_complete {
             self.events.stage(
                 PipelineStage::ExtractingFeatures,
@@ -829,7 +837,10 @@ impl PipelineRunner {
             self.events.stage(
                 PipelineStage::ExtractingFeatures,
                 0.0,
-                format!("COLMAP 正在使用 {backend_label} 提取特征"),
+                format!(
+                    "COLMAP 正在使用 {backend_label} 提取特征（max_image_size={}, max_num_features={}）",
+                    extraction_tuning.max_image_size, extraction_tuning.max_num_features
+                ),
             );
             colmap::extract_features(
                 &self.engines.colmap,
@@ -853,6 +864,7 @@ impl PipelineRunner {
                     ),
                 ),
                 gpu_index,
+                extraction_tuning,
             )
             .await?;
             state.stage = PipelineStage::ExtractingFeatures;
@@ -879,14 +891,14 @@ impl PipelineRunner {
             self.events.stage(
                 PipelineStage::Matching,
                 0.0,
-                format!(
-                    "COLMAP 正在进行 {backend_label} {}",
-                    if prepared.input_type == ProjectInputType::Images {
-                        "穷举匹配"
-                    } else {
-                        "顺序匹配"
-                    }
-                ),
+                if prepared.input_type == ProjectInputType::Images {
+                    format!("COLMAP 正在进行 {backend_label} 穷举匹配")
+                } else {
+                    format!(
+                        "COLMAP 正在进行 {backend_label} 顺序匹配（overlap={}, quadratic_overlap=1）",
+                        matching_tuning.overlap
+                    )
+                },
             );
             let observer = Some(
                 self.process_observer(
@@ -920,6 +932,7 @@ impl PipelineRunner {
                     &self.process_manager,
                     observer,
                     gpu_index,
+                    matching_tuning,
                 )
                 .await?;
             }

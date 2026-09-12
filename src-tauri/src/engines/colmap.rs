@@ -56,6 +56,135 @@ pub fn detect_cli_family(feature_help: &str, matching_help: &str) -> Option<Colm
     }
 }
 
+/// Parameter-name prefixes for the SIFT families plus the tuning knobs the
+/// pipeline configures from a quality preset.
+///
+/// A COLMAP build exposes one SIFT family for feature extraction and for every
+/// matcher at once, so a single probe per executable answers both questions and
+/// no caller needs to hardcode a `--SiftExtraction`/`--FeatureExtraction` prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColmapCliCapabilities {
+    family: ColmapCliFamily,
+}
+
+impl ColmapCliCapabilities {
+    pub const fn from_family(family: ColmapCliFamily) -> Self {
+        Self { family }
+    }
+
+    pub const fn family(self) -> ColmapCliFamily {
+        self.family
+    }
+
+    fn feature_extraction_prefix(self) -> &'static str {
+        match self.family {
+            ColmapCliFamily::Legacy39 => "--SiftExtraction.",
+            ColmapCliFamily::Modern4 => "--FeatureExtraction.",
+        }
+    }
+
+    fn feature_gpu_options(self) -> (&'static str, &'static str) {
+        match self.family {
+            ColmapCliFamily::Legacy39 => ("--SiftExtraction.use_gpu", "--SiftExtraction.gpu_index"),
+            ColmapCliFamily::Modern4 => (
+                "--FeatureExtraction.use_gpu",
+                "--FeatureExtraction.gpu_index",
+            ),
+        }
+    }
+
+    fn matching_gpu_options(self) -> (&'static str, &'static str) {
+        match self.family {
+            ColmapCliFamily::Legacy39 => ("--SiftMatching.use_gpu", "--SiftMatching.gpu_index"),
+            ColmapCliFamily::Modern4 => {
+                ("--FeatureMatching.use_gpu", "--FeatureMatching.gpu_index")
+            }
+        }
+    }
+}
+
+/// Feature-extraction limits taken from the selected quality preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureExtractionTuning {
+    /// Upper bound on the longest image edge handed to SIFT. Caps memory and time.
+    pub max_image_size: u32,
+    /// Upper bound on features per image. Lower values degrade pose accuracy.
+    pub max_num_features: u32,
+}
+
+/// Sequential-matcher tuning taken from the selected quality preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequentialMatchingTuning {
+    /// Number of neighbouring frames each frame is matched against.
+    pub overlap: u32,
+}
+
+struct CapabilityCache {
+    entries: Mutex<HashMap<PathBuf, Option<ColmapCliCapabilities>>>,
+    probe: tokio::sync::Mutex<()>,
+}
+
+fn capability_cache() -> &'static CapabilityCache {
+    static CACHE: OnceLock<CapabilityCache> = OnceLock::new();
+    CACHE.get_or_init(|| CapabilityCache {
+        entries: Mutex::new(HashMap::new()),
+        probe: tokio::sync::Mutex::new(()),
+    })
+}
+
+fn normalized_executable_path(executable: &Path) -> PathBuf {
+    executable
+        .canonicalize()
+        .unwrap_or_else(|_| executable.to_path_buf())
+}
+
+fn cached_capabilities(key: &Path) -> Option<Option<ColmapCliCapabilities>> {
+    capability_cache()
+        .entries
+        .lock()
+        .ok()
+        .and_then(|entries| entries.get(key).copied())
+}
+
+fn unsupported_cli_error() -> SplatError {
+    SplatError::UnsupportedEngine(
+        "COLMAP 既不支持 FeatureExtraction.* 也不支持 SiftExtraction.* 参数族".into(),
+    )
+}
+
+/// Resolves the CLI capabilities of one COLMAP executable.
+///
+/// The probe runs inside a single-flight lock and its result — including a
+/// negative one — is cached per normalized executable path, so repeated calls
+/// from the UI or from concurrent pipeline stages never spawn `-h` twice.
+pub async fn cli_capabilities(
+    executable: &Path,
+    manager: &ProcessManager,
+) -> Result<ColmapCliCapabilities> {
+    let cache = capability_cache();
+    let key = normalized_executable_path(executable);
+    if let Some(cached) = cached_capabilities(&key) {
+        return cached.ok_or_else(unsupported_cli_error);
+    }
+    let _probe = cache.probe.lock().await;
+    if let Some(cached) = cached_capabilities(&key) {
+        return cached.ok_or_else(unsupported_cli_error);
+    }
+    let detected = match (
+        command_help(executable, "feature_extractor", manager).await,
+        command_help(executable, "sequential_matcher", manager).await,
+    ) {
+        (Ok(feature_help), Ok(matching_help)) => {
+            detect_cli_family(&feature_help, &matching_help).map(ColmapCliCapabilities::from_family)
+        }
+        _ => None,
+    };
+    if let Ok(mut entries) = cache.entries.lock() {
+        entries.insert(key, detected);
+    }
+    detected.ok_or_else(unsupported_cli_error)
+}
+
 async fn command_help(
     executable: &Path,
     command_name: &str,
@@ -77,42 +206,6 @@ async fn command_help(
         )));
     }
     Ok(format!("{}\n{}", output.stdout, output.stderr))
-}
-
-async fn feature_gpu_options(
-    executable: &Path,
-    manager: &ProcessManager,
-) -> Result<(&'static str, &'static str)> {
-    let help = command_help(executable, "feature_extractor", manager).await?;
-    if help.contains("--FeatureExtraction.use_gpu") {
-        Ok((
-            "--FeatureExtraction.use_gpu",
-            "--FeatureExtraction.gpu_index",
-        ))
-    } else if help.contains("--SiftExtraction.use_gpu") {
-        Ok(("--SiftExtraction.use_gpu", "--SiftExtraction.gpu_index"))
-    } else {
-        Err(SplatError::UnsupportedEngine(
-            "COLMAP feature_extractor 不支持已知的 SIFT GPU 参数".into(),
-        ))
-    }
-}
-
-async fn matching_gpu_options(
-    executable: &Path,
-    matcher: &str,
-    manager: &ProcessManager,
-) -> Result<(&'static str, &'static str)> {
-    let help = command_help(executable, matcher, manager).await?;
-    if help.contains("--FeatureMatching.use_gpu") {
-        Ok(("--FeatureMatching.use_gpu", "--FeatureMatching.gpu_index"))
-    } else if help.contains("--SiftMatching.use_gpu") {
-        Ok(("--SiftMatching.use_gpu", "--SiftMatching.gpu_index"))
-    } else {
-        Err(SplatError::UnsupportedEngine(format!(
-            "COLMAP {matcher} 不支持已知的 SIFT GPU 参数"
-        )))
-    }
 }
 
 pub fn require_verified_cli(executable: &Path) -> Result<()> {
@@ -160,18 +253,12 @@ pub async fn extract_features(
     manager: &ProcessManager,
     observer: Option<ProcessObserver>,
     gpu_index: Option<u32>,
+    tuning: FeatureExtractionTuning,
 ) -> Result<()> {
-    let (use_gpu_option, gpu_index_option) = feature_gpu_options(executable, manager).await?;
+    let capabilities = cli_capabilities(executable, manager).await?;
     run_colmap(
         executable,
-        feature_extraction_args(
-            database,
-            images,
-            masks,
-            gpu_index,
-            use_gpu_option,
-            gpu_index_option,
-        ),
+        feature_extraction_args(capabilities, database, images, masks, gpu_index, tuning),
         database.parent().unwrap_or(images),
         log,
         manager,
@@ -187,12 +274,12 @@ pub async fn match_sequential(
     manager: &ProcessManager,
     observer: Option<ProcessObserver>,
     gpu_index: Option<u32>,
+    tuning: SequentialMatchingTuning,
 ) -> Result<()> {
-    let (use_gpu_option, gpu_index_option) =
-        matching_gpu_options(executable, "sequential_matcher", manager).await?;
+    let capabilities = cli_capabilities(executable, manager).await?;
     run_colmap(
         executable,
-        sequential_matching_args(database, gpu_index, use_gpu_option, gpu_index_option),
+        sequential_matching_args(capabilities, database, gpu_index, tuning),
         database.parent().unwrap_or(Path::new(".")),
         log,
         manager,
@@ -209,17 +296,10 @@ pub async fn match_exhaustive(
     observer: Option<ProcessObserver>,
     gpu_index: Option<u32>,
 ) -> Result<()> {
-    let (use_gpu_option, gpu_index_option) =
-        matching_gpu_options(executable, "exhaustive_matcher", manager).await?;
+    let capabilities = cli_capabilities(executable, manager).await?;
     run_colmap(
         executable,
-        matching_args(
-            "exhaustive_matcher",
-            database,
-            gpu_index,
-            use_gpu_option,
-            gpu_index_option,
-        ),
+        matching_args(capabilities, "exhaustive_matcher", database, gpu_index),
         database.parent().unwrap_or(Path::new(".")),
         log,
         manager,
@@ -229,13 +309,15 @@ pub async fn match_exhaustive(
 }
 
 fn feature_extraction_args(
+    capabilities: ColmapCliCapabilities,
     database: &Path,
     images: &Path,
     masks: Option<&Path>,
     gpu_index: Option<u32>,
-    use_gpu_option: &str,
-    gpu_index_option: &str,
+    tuning: FeatureExtractionTuning,
 ) -> Vec<OsString> {
+    let (use_gpu_option, gpu_index_option) = capabilities.feature_gpu_options();
+    let prefix = capabilities.feature_extraction_prefix();
     let mut args = vec![
         "feature_extractor".into(),
         "--database_path".into(),
@@ -257,36 +339,55 @@ fn feature_extraction_args(
         args.push("--ImageReader.mask_path".into());
         args.push(masks.into());
     }
+    // SIFT limits. The parameter prefix depends on the detected CLI family, so it
+    // is never hardcoded here:
+    // - max_image_size bounds the longest edge SIFT runs on, capping memory and
+    //   extraction time for high-resolution phone footage.
+    // - max_num_features bounds features per image. Values below 8192 measurably
+    //   degrade pose accuracy, so the presets stay at or above that floor.
+    // - estimate_affine_shape and domain_size_pooling are expensive and only pay
+    //   off for strongly viewpoint-dependent texture, so both stay off.
+    args.extend([
+        format!("{prefix}max_image_size").into(),
+        tuning.max_image_size.to_string().into(),
+        format!("{prefix}max_num_features").into(),
+        tuning.max_num_features.to_string().into(),
+        format!("{prefix}estimate_affine_shape").into(),
+        "0".into(),
+        format!("{prefix}domain_size_pooling").into(),
+        "0".into(),
+    ]);
     args
 }
 
 fn sequential_matching_args(
+    capabilities: ColmapCliCapabilities,
     database: &Path,
     gpu_index: Option<u32>,
-    use_gpu_option: &str,
-    gpu_index_option: &str,
+    tuning: SequentialMatchingTuning,
 ) -> Vec<OsString> {
-    let mut args = matching_args(
-        "sequential_matcher",
-        database,
-        gpu_index,
-        use_gpu_option,
-        gpu_index_option,
-    );
+    let mut args = matching_args(capabilities, "sequential_matcher", database, gpu_index);
+    // A larger overlap improves matching completeness and registration ratio but
+    // costs matching time linearly. Smart frame selection already removed 30-50%
+    // of the frames, so the freed budget is spent here.
+    // quadratic_overlap weights nearby frames higher, which follows real camera
+    // motion far better than a flat window and is essentially free.
     args.extend([
         OsString::from("--SequentialMatching.overlap"),
-        OsString::from("10"),
+        OsString::from(tuning.overlap.to_string()),
+        OsString::from("--SequentialMatching.quadratic_overlap"),
+        OsString::from("1"),
     ]);
     args
 }
 
 fn matching_args(
+    capabilities: ColmapCliCapabilities,
     matcher: &str,
     database: &Path,
     gpu_index: Option<u32>,
-    use_gpu_option: &str,
-    gpu_index_option: &str,
 ) -> Vec<OsString> {
+    let (use_gpu_option, gpu_index_option) = capabilities.matching_gpu_options();
     let mut args = vec![
         matcher.into(),
         "--database_path".into(),
@@ -356,9 +457,18 @@ pub async fn map_with_backend(
 
 pub async fn supports_global_mapper(executable: &Path, manager: &ProcessManager) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
-    let key = executable
-        .canonicalize()
-        .unwrap_or_else(|_| executable.to_path_buf());
+    let key = normalized_executable_path(executable);
+    if let Some(value) = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).copied())
+    {
+        return value;
+    }
+    // Serialize concurrent misses so a single `global_mapper -h` probe is shared
+    // instead of one process per caller.
+    let _probe = capability_cache().probe.lock().await;
     if let Some(value) = CACHE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -386,6 +496,25 @@ mod tests {
             .collect()
     }
 
+    fn modern4() -> ColmapCliCapabilities {
+        ColmapCliCapabilities::from_family(ColmapCliFamily::Modern4)
+    }
+
+    fn legacy39() -> ColmapCliCapabilities {
+        ColmapCliCapabilities::from_family(ColmapCliFamily::Legacy39)
+    }
+
+    fn tuning() -> FeatureExtractionTuning {
+        FeatureExtractionTuning {
+            max_image_size: 1600,
+            max_num_features: 8192,
+        }
+    }
+
+    fn overlap(overlap: u32) -> SequentialMatchingTuning {
+        SequentialMatchingTuning { overlap }
+    }
+
     #[test]
     fn mapper_backend_selects_only_the_subcommand() {
         assert_eq!(MapperBackend::Global.command(), "global_mapper");
@@ -407,12 +536,12 @@ mod tests {
     #[test]
     fn gpu_mode_sets_use_gpu_and_selected_index() {
         let extraction = strings(feature_extraction_args(
+            modern4(),
             Path::new("database.db"),
             Path::new("frames"),
             None,
             Some(2),
-            "--FeatureExtraction.use_gpu",
-            "--FeatureExtraction.gpu_index",
+            tuning(),
         ));
         assert!(extraction
             .windows(2)
@@ -422,10 +551,10 @@ mod tests {
             .any(|pair| pair == ["--FeatureExtraction.gpu_index", "2"]));
 
         let matching = strings(sequential_matching_args(
+            modern4(),
             Path::new("database.db"),
             Some(2),
-            "--FeatureMatching.use_gpu",
-            "--FeatureMatching.gpu_index",
+            overlap(15),
         ));
         assert!(matching
             .windows(2)
@@ -436,14 +565,57 @@ mod tests {
     }
 
     #[test]
+    fn modern_family_uses_the_feature_extraction_prefix() {
+        let extraction = strings(feature_extraction_args(
+            modern4(),
+            Path::new("database.db"),
+            Path::new("frames"),
+            None,
+            Some(0),
+            tuning(),
+        ));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--FeatureExtraction.max_image_size", "1600"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--FeatureExtraction.max_num_features", "8192"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--FeatureExtraction.estimate_affine_shape", "0"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--FeatureExtraction.domain_size_pooling", "0"]));
+        assert!(!extraction
+            .iter()
+            .any(|arg| arg.starts_with("--SiftExtraction.")));
+    }
+
+    #[test]
+    fn sequential_matching_passes_overlap_and_quadratic_overlap() {
+        let matching = strings(sequential_matching_args(
+            modern4(),
+            Path::new("database.db"),
+            Some(0),
+            overlap(20),
+        ));
+        assert!(matching
+            .windows(2)
+            .any(|pair| pair == ["--SequentialMatching.overlap", "20"]));
+        assert!(matching
+            .windows(2)
+            .any(|pair| pair == ["--SequentialMatching.quadratic_overlap", "1"]));
+    }
+
+    #[test]
     fn cpu_mode_disables_gpu_without_passing_an_index() {
         let extraction = strings(feature_extraction_args(
+            modern4(),
             Path::new("database.db"),
             Path::new("frames"),
             None,
             None,
-            "--FeatureExtraction.use_gpu",
-            "--FeatureExtraction.gpu_index",
+            tuning(),
         ));
         assert!(extraction
             .windows(2)
@@ -451,16 +623,32 @@ mod tests {
         assert!(!extraction
             .iter()
             .any(|arg| arg == "--FeatureExtraction.gpu_index"));
+        // Non-GPU tuning parameters must survive a CPU-only run.
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--FeatureExtraction.max_image_size", "1600"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--FeatureExtraction.max_num_features", "8192"]));
+        assert!(extraction
+            .iter()
+            .any(|arg| arg == "--ImageReader.camera_model"));
 
         let matching = strings(sequential_matching_args(
+            modern4(),
             Path::new("database.db"),
             None,
-            "--FeatureMatching.use_gpu",
-            "--FeatureMatching.gpu_index",
+            overlap(15),
         ));
         assert!(matching
             .windows(2)
             .any(|pair| pair == ["--FeatureMatching.use_gpu", "0"]));
+        assert!(matching
+            .windows(2)
+            .any(|pair| pair == ["--SequentialMatching.overlap", "15"]));
+        assert!(matching
+            .windows(2)
+            .any(|pair| pair == ["--SequentialMatching.quadratic_overlap", "1"]));
         assert!(!matching
             .iter()
             .any(|arg| arg == "--FeatureMatching.gpu_index"));
@@ -469,11 +657,10 @@ mod tests {
     #[test]
     fn exhaustive_matching_uses_the_selected_gpu_without_video_options() {
         let matching = strings(matching_args(
+            modern4(),
             "exhaustive_matcher",
             Path::new("database.db"),
             Some(1),
-            "--FeatureMatching.use_gpu",
-            "--FeatureMatching.gpu_index",
         ));
         assert_eq!(matching[0], "exhaustive_matcher");
         assert!(matching
@@ -503,12 +690,12 @@ mod tests {
     #[test]
     fn legacy_cli_uses_legacy_gpu_option_names() {
         let extraction = strings(feature_extraction_args(
+            legacy39(),
             Path::new("database.db"),
             Path::new("frames"),
             None,
             Some(0),
-            "--SiftExtraction.use_gpu",
-            "--SiftExtraction.gpu_index",
+            tuning(),
         ));
         assert!(extraction
             .windows(2)
@@ -516,17 +703,46 @@ mod tests {
         assert!(extraction
             .windows(2)
             .any(|pair| pair == ["--SiftExtraction.gpu_index", "0"]));
+        // The legacy family must use its own SIFT limits, never the modern prefix.
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--SiftExtraction.max_image_size", "1600"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--SiftExtraction.max_num_features", "8192"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--SiftExtraction.estimate_affine_shape", "0"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--SiftExtraction.domain_size_pooling", "0"]));
+        assert!(!extraction
+            .iter()
+            .any(|arg| arg.starts_with("--FeatureExtraction.")));
+
+        let matching = strings(sequential_matching_args(
+            legacy39(),
+            Path::new("database.db"),
+            Some(0),
+            overlap(12),
+        ));
+        assert!(matching
+            .windows(2)
+            .any(|pair| pair == ["--SiftMatching.use_gpu", "1"]));
+        assert!(matching
+            .windows(2)
+            .any(|pair| pair == ["--SiftMatching.gpu_index", "0"]));
     }
 
     #[test]
     fn transparent_input_passes_the_colmap_mask_root() {
         let extraction = strings(feature_extraction_args(
+            modern4(),
             Path::new("database.db"),
             Path::new("../frames"),
             Some(Path::new("../masks")),
             None,
-            "--FeatureExtraction.use_gpu",
-            "--FeatureExtraction.gpu_index",
+            tuning(),
         ));
         assert!(extraction
             .windows(2)

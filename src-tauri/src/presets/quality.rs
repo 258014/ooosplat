@@ -36,6 +36,9 @@ pub struct QualityPreset {
     pub enable_smart_filter: bool,
     pub smart_filter_config: FrameFilterConfig,
     pub mapper_backend: MapperPreference,
+    pub sequential_overlap: u32,
+    pub feature_max_image_size: u32,
+    pub feature_max_num_features: u32,
 }
 
 impl Quality {
@@ -48,6 +51,9 @@ impl Quality {
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::fast(),
                 mapper_backend: MapperPreference::PreferGlobal,
+                sequential_overlap: 12,
+                feature_max_image_size: 1280,
+                feature_max_num_features: 8192,
             },
             Self::Balanced => QualityPreset {
                 frame_retention_ratio: 0.50,
@@ -56,6 +62,9 @@ impl Quality {
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::balanced(),
                 mapper_backend: MapperPreference::PreferGlobal,
+                sequential_overlap: 15,
+                feature_max_image_size: 1600,
+                feature_max_num_features: 8192,
             },
             Self::High => QualityPreset {
                 frame_retention_ratio: 1.00,
@@ -64,6 +73,9 @@ impl Quality {
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::high(),
                 mapper_backend: MapperPreference::PreferGlobal,
+                sequential_overlap: 20,
+                feature_max_image_size: 2000,
+                feature_max_num_features: 16384,
             },
         }
     }
@@ -119,6 +131,27 @@ mod tests {
             Quality::High.preset().smart_filter_config.keep_per_window,
             4
         );
+    }
+
+    #[test]
+    fn matching_and_feature_limits_follow_the_quality_ladder() {
+        assert_eq!(Quality::Fast.preset().sequential_overlap, 12);
+        assert_eq!(Quality::Balanced.preset().sequential_overlap, 15);
+        assert_eq!(Quality::High.preset().sequential_overlap, 20);
+        assert_eq!(Quality::Fast.preset().feature_max_image_size, 1280);
+        assert_eq!(Quality::Balanced.preset().feature_max_image_size, 1600);
+        assert_eq!(Quality::High.preset().feature_max_image_size, 2_000);
+        assert_eq!(Quality::Fast.preset().feature_max_num_features, 8192);
+        assert_eq!(Quality::Balanced.preset().feature_max_num_features, 8192);
+        assert_eq!(Quality::High.preset().feature_max_num_features, 16_384);
+    }
+
+    #[test]
+    fn feature_count_never_drops_below_the_pose_accuracy_floor() {
+        // Below 8192 features per image, pose accuracy measurably degrades.
+        for quality in [Quality::Fast, Quality::Balanced, Quality::High] {
+            assert!(quality.preset().feature_max_num_features >= 8192);
+        }
     }
 
     #[test]
