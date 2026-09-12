@@ -217,23 +217,48 @@ pub async fn cli_capabilities(
     let feature_help = command_help(executable, "feature_extractor", manager).await?;
     let matching_help = command_help(executable, "sequential_matcher", manager).await?;
     // A missing subcommand is not a capability failure, so it is probed
-    // separately. A failed probe stays `None`: the subcommand may well exist, and
-    // caching a transient spawn or cancellation failure as "unsupported" would
-    // silently skip the calibration for the rest of the process.
-    let view_graph_calibrator = command_help(executable, "view_graph_calibrator", manager)
+    // separately: `Ok(false)` is a definite absence and stays cacheable, while a
+    // probe that could not run stays `None` so it is never cached as "unsupported".
+    let view_graph_calibrator = command_supported(executable, "view_graph_calibrator", manager)
         .await
-        .map(|_| true)
         .ok();
     let detected = detect_cli_family(&feature_help, &matching_help).map(|family| {
         ColmapCliCapabilities::from_family(family).with_view_graph_calibrator(view_graph_calibrator)
     });
-    if let (Some(capabilities), Ok(mut entries)) = (
-        detected.filter(|value| value.is_conclusive()),
-        cache.entries.lock(),
-    ) {
-        entries.insert(key, Some(capabilities));
+    // Cache the answer when it is definite: an unsupported family is a real
+    // negative, and so is a calibrator flag that was actually observed.
+    let cacheable = match detected {
+        None => true,
+        Some(capabilities) => capabilities.is_conclusive(),
+    };
+    if cacheable {
+        if let Ok(mut entries) = cache.entries.lock() {
+            entries.insert(key, detected);
+        }
     }
     detected.ok_or_else(unsupported_cli_error)
+}
+
+/// Whether a subcommand exists in this build.
+///
+/// A non-zero exit is a definite "no" — COLMAP reports an unknown command that
+/// way — while a spawn, job-object or cancellation failure returns `Err`, because
+/// nothing about the build was learned. Only definite answers may be cached.
+async fn command_supported(
+    executable: &Path,
+    command_name: &str,
+    manager: &ProcessManager,
+) -> Result<bool> {
+    let output = manager
+        .run(ProcessSpec {
+            executable: executable.to_path_buf(),
+            args: vec![command_name.into(), "-h".into()],
+            working_directory: executable.parent().map(Path::to_path_buf),
+            log_path: None,
+            observer: None,
+        })
+        .await?;
+    Ok(output.success)
 }
 
 async fn command_help(

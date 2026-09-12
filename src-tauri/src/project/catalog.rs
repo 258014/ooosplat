@@ -40,9 +40,15 @@ pub async fn runtime_samples() -> Vec<RuntimeSample> {
         ) else {
             continue;
         };
+        // Without a recorded backend the sample cannot be normalised by the model
+        // that produced it, and a wrong model turns the calibration ratio into a
+        // model-gap multiplier. Skip it rather than assume the incremental mapper.
+        let Some(backend) = runtime_sample_backend(state_bytes.as_deref()) else {
+            continue;
+        };
         samples.push(RuntimeSample {
             quality: metadata.quality,
-            backend: runtime_sample_backend(state_bytes.as_deref()),
+            backend,
             mapped_frames,
             duration_ms,
         });
@@ -81,9 +87,12 @@ fn runtime_sample_frame_count(
 
 /// Mapper backend a run actually used, read from its checkpoint.
 ///
-/// State files written before the backend was recorded default to the
-/// incremental mapper, which is what every run used back then.
-fn runtime_sample_backend(state_bytes: Option<&[u8]>) -> MapperBackend {
+/// `None` means the checkpoint does not say, which is not the same as "the
+/// incremental mapper": projects completed before the field existed, and projects
+/// built by other tooling, have run `global_mapper` without recording it. Such a
+/// sample cannot be normalised by the model that produced it, so callers must
+/// drop it instead of guessing a backend.
+fn runtime_sample_backend(state_bytes: Option<&[u8]>) -> Option<MapperBackend> {
     state_bytes
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
         .and_then(|state| {
@@ -94,7 +103,6 @@ fn runtime_sample_backend(state_bytes: Option<&[u8]>) -> MapperBackend {
                     serde_json::from_value(serde_json::Value::String(value.into())).ok()
                 })
         })
-        .unwrap_or(MapperBackend::Incremental)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -510,23 +518,24 @@ mod tests {
         // calibrate machine speed when it is normalised by the model that ran.
         assert_eq!(
             runtime_sample_backend(Some(br#"{"mapperBackend":"global"}"#)),
-            MapperBackend::Global
+            Some(MapperBackend::Global)
         );
         assert_eq!(
             runtime_sample_backend(Some(br#"{"mapperBackend":"incremental"}"#)),
-            MapperBackend::Incremental
+            Some(MapperBackend::Incremental)
         );
-        // State files written before the backend was recorded used the
-        // incremental mapper, and files without a backend must say so.
+        // An unrecorded backend is unknown, not "incremental": projects built by
+        // other tooling have run global_mapper without writing the field, and
+        // guessing would normalise them by the wrong model.
         assert_eq!(
             runtime_sample_backend(Some(br#"{"stage":"completed"}"#)),
-            MapperBackend::Incremental
+            None
         );
         assert_eq!(
             runtime_sample_backend(Some(br#"{"mapperBackend":null}"#)),
-            MapperBackend::Incremental
+            None
         );
-        assert_eq!(runtime_sample_backend(None), MapperBackend::Incremental);
+        assert_eq!(runtime_sample_backend(None), None);
     }
 
     #[test]
