@@ -1,12 +1,30 @@
 use std::{
+    collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
 use crate::{
     error::{Result, SplatError},
     process::{ProcessManager, ProcessObserver, ProcessSpec},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MapperBackend {
+    Global,
+    Incremental,
+}
+
+impl MapperBackend {
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::Global => "global_mapper",
+            Self::Incremental => "mapper",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -292,11 +310,35 @@ pub async fn map(
     manager: &ProcessManager,
     observer: Option<ProcessObserver>,
 ) -> Result<()> {
+    map_with_backend(
+        MapperBackend::Incremental,
+        executable,
+        database,
+        images,
+        output,
+        log,
+        manager,
+        observer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn map_with_backend(
+    backend: MapperBackend,
+    executable: &Path,
+    database: &Path,
+    images: &Path,
+    output: &Path,
+    log: PathBuf,
+    manager: &ProcessManager,
+    observer: Option<ProcessObserver>,
+) -> Result<()> {
     tokio::fs::create_dir_all(output).await?;
     run_colmap(
         executable,
         vec![
-            "mapper".into(),
+            backend.command().into(),
             "--database_path".into(),
             database.into(),
             "--image_path".into(),
@@ -312,6 +354,28 @@ pub async fn map(
     .await
 }
 
+pub async fn supports_global_mapper(executable: &Path, manager: &ProcessManager) -> bool {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let key = executable
+        .canonicalize()
+        .unwrap_or_else(|_| executable.to_path_buf());
+    if let Some(value) = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).copied())
+    {
+        return value;
+    }
+    let supported = command_help(executable, "global_mapper", manager)
+        .await
+        .is_ok();
+    if let Ok(mut cache) = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        cache.insert(key, supported);
+    }
+    supported
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +384,24 @@ mod tests {
         args.into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn mapper_backend_selects_only_the_subcommand() {
+        assert_eq!(MapperBackend::Global.command(), "global_mapper");
+        assert_eq!(MapperBackend::Incremental.command(), "mapper");
+    }
+
+    #[test]
+    fn mapper_backend_is_serializable() {
+        assert_eq!(
+            serde_json::to_string(&MapperBackend::Global).unwrap(),
+            "\"global\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MapperBackend::Incremental).unwrap(),
+            "\"incremental\""
+        );
     }
 
     #[test]

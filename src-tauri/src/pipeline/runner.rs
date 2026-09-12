@@ -10,6 +10,15 @@ use std::{
 use chrono::Utc;
 use serde::Serialize;
 
+const GLOBAL_MAPPER_MIN_REGISTERED_RATIO: f64 = 0.60;
+
+fn mapper_backend_label(backend: crate::engines::MapperBackend) -> &'static str {
+    match backend {
+        crate::engines::MapperBackend::Global => "Global Mapper",
+        crate::engines::MapperBackend::Incremental => "Incremental Mapper",
+    }
+}
+
 use crate::{
     engines::{
         brush, colmap,
@@ -796,12 +805,7 @@ impl PipelineRunner {
             }
             project_manager.write_state(&paths.state, &state).await?;
         }
-        let filtered_enabled = smart_filter_enabled(&state);
-        let frame_input = if filtered_enabled {
-            &paths.frames_filtered
-        } else {
-            &paths.frames
-        };
+        let (frame_input, _) = pipeline_frame_inputs(paths, &state);
         let database = paths.colmap.join("database.db");
         let sparse = paths.colmap.join("sparse");
         let colmap_log = paths.logs.join("colmap.log");
@@ -809,16 +813,8 @@ impl PipelineRunner {
         // paths on Windows. The process working directory is work/colmap, so this
         // ASCII-only relative path preserves Unicode/UNC project roots without
         // moving any project data outside the project directory.
-        let colmap_images = if filtered_enabled {
-            Path::new("../frames_filtered")
-        } else {
-            Path::new("../frames")
-        };
-        let colmap_masks = prepared.has_alpha.then_some(if filtered_enabled {
-            Path::new("../masks_filtered")
-        } else {
-            Path::new("../masks")
-        });
+        let (colmap_images, colmap_mask_root) = colmap_input_paths(&state);
+        let colmap_masks = prepared.has_alpha.then_some(colmap_mask_root);
 
         let backend_label = if acceleration.use_gpu() { "GPU" } else { "CPU" };
         let gpu_index = acceleration.gpu_index();
@@ -945,37 +941,120 @@ impl PipelineRunner {
             self.events
                 .stage(PipelineStage::Reconstructing, 1.0, "已复用相机重建检查点");
         } else {
+            let frame_count = state
+                .frames
+                .as_ref()
+                .and_then(|frames| frames.filtered_frames)
+                .unwrap_or(prepared.extracted_frames);
+            let preference = quality.preset().mapper_backend;
+            let global_available =
+                colmap::supports_global_mapper(&self.engines.colmap, &self.process_manager).await;
+            let preferred_backend = preference.backend(global_available);
+            let mut selected_backend = preferred_backend;
+            let started = Instant::now();
             reset_directory(&sparse).await?;
-            self.events
-                .stage(PipelineStage::Reconstructing, 0.0, "正在增量重建相机轨迹");
-            colmap::map(
-                &self.engines.colmap,
-                &database,
-                colmap_images,
-                &sparse,
-                colmap_log,
-                &self.process_manager,
-                Some(
-                    self.process_observer(
+            self.events.stage(
+                PipelineStage::Reconstructing,
+                0.0,
+                format!(
+                    "正在使用 {} 重建相机轨迹",
+                    mapper_backend_label(preferred_backend)
+                ),
+            );
+            if preferred_backend == colmap::MapperBackend::Global {
+                let global_result = colmap::map_with_backend(
+                    colmap::MapperBackend::Global,
+                    &self.engines.colmap,
+                    &database,
+                    colmap_images,
+                    &sparse,
+                    colmap_log.clone(),
+                    &self.process_manager,
+                    Some(self.process_observer(
                         PipelineStage::Reconstructing,
                         PipelineEngine::Colmap,
-                        Some(
-                            state
-                                .frames
-                                .as_ref()
-                                .and_then(|frames| frames.filtered_frames)
-                                .unwrap_or(prepared.extracted_frames),
-                        ),
+                        Some(frame_count),
                         ObserverMode::Mapper,
-                    ),
-                ),
-            )
-            .await?;
+                    )),
+                )
+                .await;
+                let global_succeeded = global_result.is_ok();
+                let global_quality = global_result
+                    .ok()
+                    .and_then(|_| best_sparse_model(frame_input, &sparse).ok())
+                    .filter(|(_, report)| {
+                        report.registered_ratio >= GLOBAL_MAPPER_MIN_REGISTERED_RATIO
+                    });
+                if global_quality.is_none() {
+                    let reason = if !global_succeeded {
+                        "global_mapper 执行失败"
+                    } else {
+                        "global_mapper 输出无效或注册率低于 60%"
+                    };
+                    self.events.send(
+                        PipelineStage::Reconstructing,
+                        Some(PipelineEngine::Colmap),
+                        EventKind::Log,
+                        EventLevel::Warning,
+                        Some(0.2),
+                        false,
+                        format!("Global Mapper 未达到要求，回退 Incremental：{reason}"),
+                        None,
+                        None,
+                        None,
+                    );
+                    reset_directory(&sparse).await?;
+                    selected_backend = colmap::MapperBackend::Incremental;
+                    colmap::map_with_backend(
+                        selected_backend,
+                        &self.engines.colmap,
+                        &database,
+                        colmap_images,
+                        &sparse,
+                        colmap_log.clone(),
+                        &self.process_manager,
+                        Some(self.process_observer(
+                            PipelineStage::Reconstructing,
+                            PipelineEngine::Colmap,
+                            Some(frame_count),
+                            ObserverMode::Mapper,
+                        )),
+                    )
+                    .await?;
+                }
+            } else {
+                colmap::map_with_backend(
+                    selected_backend,
+                    &self.engines.colmap,
+                    &database,
+                    colmap_images,
+                    &sparse,
+                    colmap_log.clone(),
+                    &self.process_manager,
+                    Some(self.process_observer(
+                        PipelineStage::Reconstructing,
+                        PipelineEngine::Colmap,
+                        Some(frame_count),
+                        ObserverMode::Mapper,
+                    )),
+                )
+                .await?;
+            }
+            let (_, final_report) = best_sparse_model(frame_input, &sparse)?;
             state.stage = PipelineStage::Reconstructing;
             state.reconstruction_complete = true;
+            state.mapper_backend = Some(selected_backend);
             project_manager.write_state(&paths.state, &state).await?;
-            self.events
-                .stage(PipelineStage::Reconstructing, 1.0, "增量重建完成");
+            self.events.stage(
+                PipelineStage::Reconstructing,
+                1.0,
+                format!(
+                    "{} 重建完成，耗时 {} 秒，注册率 {:.1}%",
+                    mapper_backend_label(selected_backend),
+                    started.elapsed().as_secs(),
+                    final_report.registered_ratio * 100.0
+                ),
+            );
         }
 
         self.events.stage(
@@ -1012,24 +1091,23 @@ impl PipelineRunner {
             reset_directory(&paths.brush).await?;
             let dataset = prepare_brush_dataset(&paths.brush, frame_input, &model).await?;
             let runtime_samples = catalog::runtime_samples().await;
-            let mut estimate_plan = prepared.plan.clone();
-            estimate_plan.estimated_frames = state
-                .frames
-                .as_ref()
-                .and_then(|frames| frames.filtered_frames)
-                .unwrap_or(prepared.extracted_frames);
+            let mapper_backend = state
+                .mapper_backend
+                .unwrap_or_else(|| quality.preset().mapper_backend.backend(true));
             let estimated_brush_duration_ms = match (&prepared.video, &prepared.image_sequence) {
                 (Some(video), _) => estimate_calibrated_brush_stage_ms(
                     video,
-                    &estimate_plan,
+                    &prepared.plan,
                     quality,
                     &runtime_samples,
+                    mapper_backend,
                 ),
                 (_, Some(images)) => estimate_calibrated_brush_stage_ms_for_images(
                     images.image_count,
-                    &estimate_plan,
+                    &prepared.plan,
                     quality,
                     &runtime_samples,
+                    mapper_backend,
                 ),
                 _ => return Err(SplatError::Process("项目输入信息不完整".into())),
             };
@@ -1587,8 +1665,16 @@ async fn normalize_checkpoints(paths: &ProjectPaths, state: &mut PipelineStateFi
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
     state.features_complete = filter_complete && state.features_complete && database_complete;
     state.matching_complete = state.features_complete && state.matching_complete;
+    let mapper_matches_preference = match state.preset.preset().mapper_backend {
+        crate::presets::MapperPreference::PreferGlobal => true,
+        crate::presets::MapperPreference::ForceIncremental => {
+            state.mapper_backend.is_none()
+                || state.mapper_backend == Some(crate::engines::MapperBackend::Incremental)
+        }
+    };
     state.reconstruction_complete = state.matching_complete
         && state.reconstruction_complete
+        && mapper_matches_preference
         && best_sparse_model(
             if smart_filter_enabled(state) {
                 &paths.frames_filtered
@@ -1609,6 +1695,28 @@ async fn normalize_checkpoints(paths: &ProjectPaths, state: &mut PipelineStateFi
 
 fn smart_filter_enabled(state: &PipelineStateFile) -> bool {
     state.input_type == ProjectInputType::Video && state.preset.preset().enable_smart_filter
+}
+
+fn pipeline_frame_inputs<'a>(
+    paths: &'a ProjectPaths,
+    state: &PipelineStateFile,
+) -> (&'a Path, &'a Path) {
+    if smart_filter_enabled(state) {
+        (&paths.frames_filtered, &paths.masks_filtered)
+    } else {
+        (&paths.frames, &paths.masks)
+    }
+}
+
+fn colmap_input_paths(state: &PipelineStateFile) -> (&'static Path, &'static Path) {
+    if smart_filter_enabled(state) {
+        (
+            Path::new("../frames_filtered"),
+            Path::new("../masks_filtered"),
+        )
+    } else {
+        (Path::new("../frames"), Path::new("../masks"))
+    }
 }
 
 async fn filter_checkpoint_complete(
@@ -1881,6 +1989,50 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn pipeline_paths_select_filtered_video_and_raw_images() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::existing(uuid::Uuid::nil(), root.path().to_path_buf());
+        let video = PipelineStateFile::created_for(Quality::Balanced, ProjectInputType::Video);
+        assert_eq!(
+            pipeline_frame_inputs(&paths, &video).0,
+            paths.frames_filtered
+        );
+        assert_eq!(
+            colmap_input_paths(&video).0,
+            Path::new("../frames_filtered")
+        );
+
+        let images = PipelineStateFile::created_for(Quality::Balanced, ProjectInputType::Images);
+        assert_eq!(pipeline_frame_inputs(&paths, &images).0, paths.frames);
+        assert_eq!(colmap_input_paths(&images).0, Path::new("../frames"));
+    }
+
+    #[tokio::test]
+    async fn brush_dataset_copies_only_the_selected_frame_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let frames = root.path().join("frames_filtered");
+        let model = root.path().join("model");
+        let brush = root.path().join("brush");
+        tokio::fs::create_dir_all(&frames).await.unwrap();
+        tokio::fs::create_dir_all(&model).await.unwrap();
+        tokio::fs::write(frames.join("kept.jpg"), b"kept")
+            .await
+            .unwrap();
+        for name in ["cameras.bin", "images.bin", "points3D.bin"] {
+            tokio::fs::write(model.join(name), b"model").await.unwrap();
+        }
+        let dataset = prepare_brush_dataset(&brush, &frames, &model)
+            .await
+            .unwrap();
+        assert!(dataset.join("images").join("kept.jpg").is_file());
+        assert!(dataset
+            .join("sparse")
+            .join("0")
+            .join("cameras.bin")
+            .is_file());
+    }
 
     fn sphere_region(center: [f64; 3], radius: f64) -> crate::project::GaussianCrop {
         crate::project::GaussianCrop::Sphere { center, radius }
@@ -2176,6 +2328,73 @@ mod tests {
         assert!(!state.features_complete);
         assert!(!state.matching_complete);
         assert_eq!(state.stage, PipelineStage::ExtractingFrames);
+    }
+
+    #[tokio::test]
+    async fn image_inputs_treat_filter_completion_as_raw_frame_completion() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::existing(uuid::Uuid::nil(), temporary.path().to_path_buf());
+        let mut state = PipelineStateFile::created_for(Quality::Balanced, ProjectInputType::Images);
+        state.frames = Some(FrameState {
+            retention_ratio: 1.0,
+            sampling_fps: 0.0,
+            estimated_frames: 1,
+            extracted_frames: Some(1),
+            image_format: Some("images".into()),
+            mask_count: Some(0),
+            has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
+        });
+        assert!(filter_checkpoint_complete(&paths, &state).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn filtering_preserves_raw_frames_and_extracted_count() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::existing(uuid::Uuid::nil(), temporary.path().to_path_buf());
+        tokio::fs::create_dir_all(&paths.frames).await.unwrap();
+        for index in 0..4 {
+            let image = image::GrayImage::from_fn(32, 32, |x, y| {
+                image::Luma([((x * 13 + y * 17 + index * 29) % 255) as u8])
+            });
+            image
+                .save(paths.frames.join(format!("frame_{index:06}.png")))
+                .unwrap();
+        }
+        let mut state = PipelineStateFile::created(Quality::Balanced);
+        let plan = FramePlan {
+            retention_ratio: 0.5,
+            sampling_fps: 15.0,
+            estimated_frames: 4,
+        };
+        state.frames = Some(FrameState {
+            retention_ratio: plan.retention_ratio,
+            sampling_fps: plan.sampling_fps,
+            estimated_frames: plan.estimated_frames,
+            extracted_frames: Some(4),
+            image_format: Some("png".into()),
+            mask_count: Some(0),
+            has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
+        });
+        let prepared = PreparedFrames {
+            input_type: ProjectInputType::Video,
+            video: None,
+            image_sequence: None,
+            plan,
+            extracted_frames: 4,
+            image_format: "png".into(),
+            mask_count: 0,
+            has_alpha: false,
+        };
+        ensure_filter_checkpoint(&paths, &mut state, &prepared)
+            .await
+            .unwrap();
+        assert_eq!(count_image_files(&paths.frames).await.unwrap(), 4);
+        assert_eq!(state.frames.as_ref().unwrap().extracted_frames, Some(4));
+        assert!(state.frames.as_ref().unwrap().filtered_frames.is_some());
     }
 
     #[tokio::test]

@@ -1,7 +1,23 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
-use crate::video::FrameFilterConfig;
+use crate::{engines::colmap::MapperBackend, video::FrameFilterConfig};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MapperPreference {
+    PreferGlobal,
+    ForceIncremental,
+}
+
+impl MapperPreference {
+    pub const fn backend(self, global_available: bool) -> MapperBackend {
+        match self {
+            Self::PreferGlobal if global_available => MapperBackend::Global,
+            _ => MapperBackend::Incremental,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -19,6 +35,7 @@ pub struct QualityPreset {
     pub brush_max_resolution: u32,
     pub enable_smart_filter: bool,
     pub smart_filter_config: FrameFilterConfig,
+    pub mapper_backend: MapperPreference,
 }
 
 impl Quality {
@@ -30,6 +47,7 @@ impl Quality {
                 brush_max_resolution: 1_200,
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::fast(),
+                mapper_backend: MapperPreference::PreferGlobal,
             },
             Self::Balanced => QualityPreset {
                 frame_retention_ratio: 0.50,
@@ -37,6 +55,7 @@ impl Quality {
                 brush_max_resolution: 1_600,
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::balanced(),
+                mapper_backend: MapperPreference::PreferGlobal,
             },
             Self::High => QualityPreset {
                 frame_retention_ratio: 1.00,
@@ -44,6 +63,7 @@ impl Quality {
                 brush_max_resolution: 2_000,
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::high(),
+                mapper_backend: MapperPreference::PreferGlobal,
             },
         }
     }

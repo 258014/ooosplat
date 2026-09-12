@@ -17,7 +17,10 @@ use crate::{
     },
     error::{Result, SplatError},
     pipeline::{
-        estimate::{estimate_runtime, estimate_runtime_for_images, RuntimeEstimate},
+        estimate::{
+            estimate_runtime_for_images_with_backend, estimate_runtime_with_backend,
+            RuntimeEstimate,
+        },
         runner::{PipelineResult, PipelineRunner},
     },
     presets::Quality,
@@ -200,8 +203,19 @@ pub async fn probe_and_plan(
         .await
         .map_err(|error| SplatError::Process(format!("图片序列分析任务失败：{error}")))??;
         let plan = create_image_plan(&image_sequence, &quality.preset());
-        let estimate =
-            estimate_runtime_for_images(image_sequence.image_count, &plan, quality, &samples);
+        let global_available = crate::engines::colmap::supports_global_mapper(
+            &engine_paths.colmap,
+            &crate::process::ProcessManager::new(),
+        )
+        .await;
+        let backend = quality.preset().mapper_backend.backend(global_available);
+        let estimate = estimate_runtime_for_images_with_backend(
+            image_sequence.image_count,
+            &plan,
+            quality,
+            &samples,
+            backend,
+        );
         Ok(ProbeAndPlan {
             input_type: ProjectInputType::Images,
             video: None,
@@ -212,7 +226,13 @@ pub async fn probe_and_plan(
     } else {
         let video = probe_video(&engine_paths.ffprobe, &input, None).await?;
         let plan = SmartFrameSelection.create_plan(&video, &quality.preset());
-        let estimate = estimate_runtime(&video, &plan, quality, &samples);
+        let global_available = crate::engines::colmap::supports_global_mapper(
+            &engine_paths.colmap,
+            &crate::process::ProcessManager::new(),
+        )
+        .await;
+        let backend = quality.preset().mapper_backend.backend(global_available);
+        let estimate = estimate_runtime_with_backend(&video, &plan, quality, &samples, backend);
         Ok(ProbeAndPlan {
             input_type: ProjectInputType::Video,
             video: Some(video),
@@ -272,7 +292,19 @@ pub async fn estimate_project_runtime(
             let plan = saved_plan.unwrap_or_else(|| {
                 SmartFrameSelection.create_plan(&video, &metadata.quality.preset())
             });
-            estimate_runtime(&video, &plan, metadata.quality, &samples)
+            let global_available = crate::engines::colmap::supports_global_mapper(
+                &paths_for_app(&app).colmap,
+                &crate::process::ProcessManager::new(),
+            )
+            .await;
+            let backend = state.mapper_backend.unwrap_or_else(|| {
+                metadata
+                    .quality
+                    .preset()
+                    .mapper_backend
+                    .backend(global_available)
+            });
+            estimate_runtime_with_backend(&video, &plan, metadata.quality, &samples, backend)
         }
         ProjectInputType::Images => {
             let image_sequence = match state.image_sequence.clone() {
@@ -286,11 +318,24 @@ pub async fn estimate_project_runtime(
             };
             let plan = saved_plan
                 .unwrap_or_else(|| create_image_plan(&image_sequence, &metadata.quality.preset()));
-            estimate_runtime_for_images(
+            let global_available = crate::engines::colmap::supports_global_mapper(
+                &paths_for_app(&app).colmap,
+                &crate::process::ProcessManager::new(),
+            )
+            .await;
+            let backend = state.mapper_backend.unwrap_or_else(|| {
+                metadata
+                    .quality
+                    .preset()
+                    .mapper_backend
+                    .backend(global_available)
+            });
+            estimate_runtime_for_images_with_backend(
                 image_sequence.image_count,
                 &plan,
                 metadata.quality,
                 &samples,
+                backend,
             )
         }
     };

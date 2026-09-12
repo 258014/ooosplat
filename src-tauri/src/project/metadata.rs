@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    engines::MapperBackend,
     pipeline::PipelineStage,
     presets::Quality,
     video::{FramePlan, ImageSequenceInfo, VideoInfo},
@@ -278,6 +279,8 @@ pub struct PipelineStateFile {
     pub frames: Option<FrameState>,
     #[serde(default)]
     pub filter_complete: bool,
+    #[serde(default)]
+    pub mapper_backend: Option<MapperBackend>,
     pub features_complete: bool,
     pub matching_complete: bool,
     pub reconstruction_complete: bool,
@@ -298,6 +301,7 @@ impl PipelineStateFile {
             image_sequence: None,
             frames: None,
             filter_complete: false,
+            mapper_backend: None,
             features_complete: false,
             matching_complete: false,
             reconstruction_complete: false,

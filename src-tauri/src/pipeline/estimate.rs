@@ -1,9 +1,24 @@
 use serde::Serialize;
 
 use crate::{
+    engines::MapperBackend,
     presets::Quality,
     video::{FramePlan, VideoInfo},
 };
+
+const INCREMENTAL_RECONSTRUCTION_COEFFICIENT: f64 = 176.0;
+const GLOBAL_RECONSTRUCTION_COEFFICIENT: f64 = 40.0;
+
+fn reconstruction_estimate_ms(frames: u64, backend: MapperBackend) -> f64 {
+    let frame_count = frames.max(1) as f64;
+    // TODO: regress these coefficients against S0 mapper timing baselines.
+    match backend {
+        MapperBackend::Incremental => {
+            INCREMENTAL_RECONSTRUCTION_COEFFICIENT * frame_count.powf(1.5)
+        }
+        MapperBackend::Global => GLOBAL_RECONSTRUCTION_COEFFICIENT * frame_count.powf(1.1),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RuntimeSample {
@@ -37,7 +52,24 @@ pub fn estimate_runtime(
     quality: Quality,
     samples: &[RuntimeSample],
 ) -> RuntimeEstimate {
-    estimate_runtime_for_input(video.total_frames, plan, quality, samples, "视频总帧")
+    estimate_runtime_with_backend(video, plan, quality, samples, MapperBackend::Global)
+}
+
+pub fn estimate_runtime_with_backend(
+    video: &VideoInfo,
+    plan: &FramePlan,
+    quality: Quality,
+    samples: &[RuntimeSample],
+    backend: MapperBackend,
+) -> RuntimeEstimate {
+    estimate_runtime_for_input(
+        video.total_frames,
+        plan,
+        quality,
+        samples,
+        backend,
+        "视频总帧",
+    )
 }
 
 pub fn estimate_runtime_for_images(
@@ -46,7 +78,24 @@ pub fn estimate_runtime_for_images(
     quality: Quality,
     samples: &[RuntimeSample],
 ) -> RuntimeEstimate {
-    let mut estimate = estimate_runtime_for_input(image_count, plan, quality, samples, "输入图片");
+    estimate_runtime_for_images_with_backend(
+        image_count,
+        plan,
+        quality,
+        samples,
+        MapperBackend::Global,
+    )
+}
+
+pub fn estimate_runtime_for_images_with_backend(
+    image_count: u64,
+    plan: &FramePlan,
+    quality: Quality,
+    samples: &[RuntimeSample],
+    backend: MapperBackend,
+) -> RuntimeEstimate {
+    let mut estimate =
+        estimate_runtime_for_input(image_count, plan, quality, samples, backend, "输入图片");
     estimate.basis = if estimate.sample_count == 0 {
         format!("根据 {image_count} 张输入图片和质量档位估算；完成任务后会自动校准")
     } else {
@@ -63,9 +112,10 @@ fn estimate_runtime_for_input(
     plan: &FramePlan,
     quality: Quality,
     samples: &[RuntimeSample],
+    backend: MapperBackend,
     _source_label: &str,
 ) -> RuntimeEstimate {
-    let base = base_estimate_ms(plan.estimated_frames, quality);
+    let base = base_estimate_ms_with_backend(plan.estimated_frames, quality, backend);
     let valid_samples = samples
         .iter()
         .filter(|sample| sample.duration_ms >= 10_000 && sample.extracted_frames > 0)
@@ -94,7 +144,8 @@ fn estimate_runtime_for_input(
     let mut calibration = calibration_source
         .into_iter()
         .map(|sample| {
-            let expected = base_estimate_ms(sample.extracted_frames, sample.quality);
+            let expected =
+                base_estimate_ms_with_backend(sample.extracted_frames, sample.quality, backend);
             (sample.duration_ms as f64 / expected.max(1) as f64).clamp(0.15, 5.0)
         })
         .collect::<Vec<_>>();
@@ -128,13 +179,42 @@ fn estimate_runtime_for_input(
     }
 }
 
+#[cfg(test)]
 fn base_estimate_ms(frames: u64, quality: Quality) -> u64 {
-    let frame_count = frames.max(1) as f64;
+    base_estimate_ms_with_backend(frames, quality, MapperBackend::Global)
+}
 
-    // Feature work grows roughly linearly with frames and pixels, while camera
-    // reconstruction and bundle adjustment grow faster as more views are added.
-    let preparation_ms = 8_000.0 + frame_count * 55.0;
-    let reconstruction_ms = 176.0 * frame_count.powf(1.5);
+fn base_estimate_ms_with_backend(frames: u64, quality: Quality, backend: MapperBackend) -> u64 {
+    base_estimate_ms_with_preparation_and_backend(frames, frames, quality, backend)
+}
+
+#[cfg(test)]
+fn base_estimate_ms_with_preparation(
+    reconstruction_frames: u64,
+    preparation_frames: u64,
+    quality: Quality,
+) -> u64 {
+    base_estimate_ms_with_preparation_and_backend(
+        reconstruction_frames,
+        preparation_frames,
+        quality,
+        MapperBackend::Global,
+    )
+}
+
+fn base_estimate_ms_with_preparation_and_backend(
+    reconstruction_frames: u64,
+    preparation_frames: u64,
+    quality: Quality,
+    backend: MapperBackend,
+) -> u64 {
+    let reconstruction_count = reconstruction_frames.max(1) as f64;
+    let preparation_count = preparation_frames.max(1) as f64;
+
+    // Preparation follows the actual filtered input count. The reconstruction
+    // complexity model intentionally keeps using the original planned count.
+    let preparation_ms = 8_000.0 + preparation_count * 55.0;
+    let reconstruction_ms = reconstruction_estimate_ms(reconstruction_count as u64, backend);
     let brush_ms = estimate_brush_stage_ms(quality) as f64;
     (preparation_ms + reconstruction_ms + brush_ms).round() as u64
 }
@@ -156,9 +236,12 @@ pub(crate) fn estimate_calibrated_brush_stage_ms(
     plan: &FramePlan,
     quality: Quality,
     samples: &[RuntimeSample],
+    backend: MapperBackend,
 ) -> u64 {
-    let base_total_ms = base_estimate_ms(plan.estimated_frames, quality).max(1);
-    let calibrated_total_ms = estimate_runtime(video, plan, quality, samples).estimated_ms;
+    let base_total_ms =
+        base_estimate_ms_with_backend(plan.estimated_frames, quality, backend).max(1);
+    let calibrated_total_ms =
+        estimate_runtime_with_backend(video, plan, quality, samples, backend).estimated_ms;
     let calibration = calibrated_total_ms as f64 / base_total_ms as f64;
     (estimate_brush_stage_ms(quality) as f64 * calibration)
         .round()
@@ -170,10 +253,13 @@ pub(crate) fn estimate_calibrated_brush_stage_ms_for_images(
     plan: &FramePlan,
     quality: Quality,
     samples: &[RuntimeSample],
+    backend: MapperBackend,
 ) -> u64 {
-    let base_total_ms = base_estimate_ms(plan.estimated_frames, quality).max(1);
+    let base_total_ms =
+        base_estimate_ms_with_backend(plan.estimated_frames, quality, backend).max(1);
     let calibrated_total_ms =
-        estimate_runtime_for_images(image_count, plan, quality, samples).estimated_ms;
+        estimate_runtime_for_input(image_count, plan, quality, samples, backend, "输入图片")
+            .estimated_ms;
     let calibration = calibrated_total_ms as f64 / base_total_ms as f64;
     (estimate_brush_stage_ms(quality) as f64 * calibration)
         .round()
@@ -207,11 +293,27 @@ mod tests {
     }
 
     #[test]
+    fn mapper_backend_estimate_prefers_global_complexity() {
+        let global = base_estimate_ms_with_backend(2_000, Quality::Balanced, MapperBackend::Global);
+        let incremental =
+            base_estimate_ms_with_backend(2_000, Quality::Balanced, MapperBackend::Incremental);
+        assert!(global < incremental);
+        assert!(incremental > global * 2);
+    }
+
+    #[test]
     fn quality_and_frame_count_increase_the_estimate() {
         let fast = base_estimate_ms(48, Quality::Fast);
         let balanced = base_estimate_ms(72, Quality::Balanced);
         let high = base_estimate_ms(120, Quality::High);
         assert!(fast < balanced && balanced < high);
+    }
+
+    #[test]
+    fn filtered_count_changes_only_the_preparation_component() {
+        let full = base_estimate_ms_with_preparation(100, 100, Quality::Balanced);
+        let filtered = base_estimate_ms_with_preparation(100, 40, Quality::Balanced);
+        assert_eq!(full - filtered, 60 * 55);
     }
 
     #[test]
@@ -239,8 +341,13 @@ mod tests {
             duration_ms: base_total * 2,
         };
 
-        let calibrated =
-            estimate_calibrated_brush_stage_ms(&video, &plan, Quality::Balanced, &[sample]);
+        let calibrated = estimate_calibrated_brush_stage_ms(
+            &video,
+            &plan,
+            Quality::Balanced,
+            &[sample],
+            MapperBackend::Global,
+        );
         assert_eq!(calibrated, estimate_brush_stage_ms(Quality::Balanced) * 2);
     }
 
@@ -281,7 +388,7 @@ mod tests {
             RuntimeSample {
                 quality: Quality::Balanced,
                 extracted_frames: 533,
-                duration_ms: 3_954_000,
+                duration_ms: base_estimate_ms(533, Quality::Balanced) * 2,
             },
             RuntimeSample {
                 quality: Quality::Fast,
@@ -296,7 +403,10 @@ mod tests {
         ];
         let estimate = estimate_runtime(&video, &plan, Quality::Balanced, &samples);
         assert_eq!(estimate.sample_count, 1);
-        assert_eq!(estimate.estimated_ms, 3_954_000);
+        assert_eq!(
+            estimate.estimated_ms,
+            base_estimate_ms(533, Quality::Balanced) * 2
+        );
         assert!(estimate.basis.contains("1 个同档位、相近帧数任务"));
     }
 
