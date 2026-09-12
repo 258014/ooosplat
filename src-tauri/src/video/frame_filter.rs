@@ -73,6 +73,27 @@ impl FrameFilterConfig {
     }
 }
 
+/// Stable identity for the filtering inputs, including strategy semantics.
+pub fn filter_config_hash(config: &FrameFilterConfig, source_frames: u64) -> String {
+    let canonical = format!(
+        "v={FILTER_STRATEGY_VERSION};source_frames={source_frames};blur={:.17};over={:.17};under={:.17};margin={:.17};window={};keep={};edge={};diff={:.17}",
+        config.blur_threshold,
+        config.overexposure_ratio,
+        config.underexposure_ratio,
+        config.exposure_outlier_margin,
+        config.window_size,
+        config.keep_per_window,
+        config.analysis_max_edge,
+        config.min_diff_score,
+    );
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in canonical.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a-{hash:016x}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameMetrics {
@@ -633,6 +654,18 @@ mod tests {
     use super::*;
     use image::{ImageBuffer, Luma};
     use tempfile::tempdir;
+
+    #[test]
+    fn filter_hash_is_stable_and_includes_source_count_and_config() {
+        let config = FrameFilterConfig::balanced();
+        let first = filter_config_hash(&config, 120);
+        assert_eq!(first, filter_config_hash(&config, 120));
+        assert_ne!(first, filter_config_hash(&config, 121));
+        let mut changed = config;
+        changed.keep_per_window += 1;
+        assert_ne!(first, filter_config_hash(&changed, 120));
+        assert!(first.starts_with("fnv1a-"));
+    }
 
     fn config() -> FrameFilterConfig {
         FrameFilterConfig {

@@ -37,8 +37,7 @@ use crate::{
     },
     video::{
         filter_frames_with_masks_at_fps, prepare_image_sequence, validate_prepared_image_sequence,
-        FrameFilterConfig, FramePlan, FrameSelectionStrategy, ImageSequenceInfo,
-        SmartFrameSelection, VideoInfo,
+        FramePlan, FrameSelectionStrategy, ImageSequenceInfo, SmartFrameSelection, VideoInfo,
     },
 };
 
@@ -278,7 +277,7 @@ impl PipelineRunner {
             Some(plan.estimated_frames),
             ObserverMode::Ffmpeg,
         );
-        let mut extraction = extract_uniform_frames(
+        let extraction = extract_uniform_frames(
             &self.engines.ffmpeg,
             input,
             output,
@@ -290,39 +289,6 @@ impl PipelineRunner {
             Some(observer),
         )
         .await?;
-        let filtered_output = output.with_file_name("frames.filtered");
-        if quality.preset().enable_smart_filter {
-            let config: FrameFilterConfig = quality.preset().smart_filter_config;
-            let input_for_filter = output.to_path_buf();
-            let output_for_filter = filtered_output.clone();
-            let masks_for_filter = masks.to_path_buf();
-            let sampling_fps = plan.sampling_fps;
-            let outcome = tokio::task::spawn_blocking(move || {
-                filter_frames_with_masks_at_fps(
-                    &input_for_filter,
-                    &output_for_filter,
-                    &masks_for_filter,
-                    &config,
-                    sampling_fps,
-                )
-            })
-            .await
-            .map_err(|error| SplatError::Process(format!("智能抽帧过滤任务失败：{error}")))?
-            .map_err(|error| SplatError::Process(format!("智能抽帧过滤失败：{error}")))?;
-            replace_filtered_frames(output, masks, &filtered_output, video.has_alpha).await?;
-            extraction.frame_count = outcome.kept_frames as u64;
-            if extraction.has_alpha {
-                extraction.mask_count = outcome.kept_frames as u64;
-            }
-            self.events.stage(
-                PipelineStage::ExtractingFrames,
-                1.0,
-                format!(
-                    "已智能筛选 {} / {} 帧",
-                    outcome.kept_frames, outcome.total_frames
-                ),
-            );
-        }
         self.events.stage(
             PipelineStage::ExtractingFrames,
             1.0,
@@ -577,6 +543,8 @@ impl PipelineRunner {
             image_format: Some("merged".into()),
             mask_count: Some(0),
             has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
         });
         project_manager.write_state(&paths.state, &state).await?;
         self.execute_project(project_manager, paths, &mut metadata, state, &acceleration)
@@ -796,7 +764,44 @@ impl PipelineRunner {
                 prepared
             };
         let source_duration_seconds = prepared.video.as_ref().map(|video| video.duration);
-
+        let filter_result = ensure_filter_checkpoint(paths, &mut state, &prepared).await?;
+        project_manager.write_state(&paths.state, &state).await?;
+        if let Some(result) = filter_result {
+            self.events.stage(
+                PipelineStage::ExtractingFrames,
+                1.0,
+                format!(
+                    "已智能筛选 {} / {} 帧（模糊 {} · 曝光 {} · 冗余 {} · 兜底 {}）",
+                    result.kept_frames,
+                    result.total_frames,
+                    result.rejected_blur,
+                    result.rejected_exposure,
+                    result.rejected_redundant,
+                    result.forced_keeps
+                ),
+            );
+            if result.forced_keeps * 10 > result.total_frames {
+                self.events.send(
+                    PipelineStage::ExtractingFrames,
+                    Some(PipelineEngine::System),
+                    EventKind::Log,
+                    EventLevel::Warning,
+                    Some(1.0),
+                    false,
+                    "智能筛选兜底帧占比超过 10%，请检查素材质量或筛选参数",
+                    Some(result.forced_keeps as u64),
+                    Some(result.total_frames as u64),
+                    Some("frames"),
+                );
+            }
+            project_manager.write_state(&paths.state, &state).await?;
+        }
+        let filtered_enabled = smart_filter_enabled(&state);
+        let frame_input = if filtered_enabled {
+            &paths.frames_filtered
+        } else {
+            &paths.frames
+        };
         let database = paths.colmap.join("database.db");
         let sparse = paths.colmap.join("sparse");
         let colmap_log = paths.logs.join("colmap.log");
@@ -804,8 +809,16 @@ impl PipelineRunner {
         // paths on Windows. The process working directory is work/colmap, so this
         // ASCII-only relative path preserves Unicode/UNC project roots without
         // moving any project data outside the project directory.
-        let colmap_images = Path::new("../frames");
-        let colmap_masks = prepared.has_alpha.then_some(Path::new("../masks"));
+        let colmap_images = if filtered_enabled {
+            Path::new("../frames_filtered")
+        } else {
+            Path::new("../frames")
+        };
+        let colmap_masks = prepared.has_alpha.then_some(if filtered_enabled {
+            Path::new("../masks_filtered")
+        } else {
+            Path::new("../masks")
+        });
 
         let backend_label = if acceleration.use_gpu() { "GPU" } else { "CPU" };
         let gpu_index = acceleration.gpu_index();
@@ -829,12 +842,20 @@ impl PipelineRunner {
                 colmap_masks,
                 colmap_log.clone(),
                 &self.process_manager,
-                Some(self.process_observer(
-                    PipelineStage::ExtractingFeatures,
-                    PipelineEngine::Colmap,
-                    Some(prepared.extracted_frames),
-                    ObserverMode::BracketProgress,
-                )),
+                Some(
+                    self.process_observer(
+                        PipelineStage::ExtractingFeatures,
+                        PipelineEngine::Colmap,
+                        Some(
+                            state
+                                .frames
+                                .as_ref()
+                                .and_then(|frames| frames.filtered_frames)
+                                .unwrap_or(prepared.extracted_frames),
+                        ),
+                        ObserverMode::BracketProgress,
+                    ),
+                ),
                 gpu_index,
             )
             .await?;
@@ -871,12 +892,20 @@ impl PipelineRunner {
                     }
                 ),
             );
-            let observer = Some(self.process_observer(
-                PipelineStage::Matching,
-                PipelineEngine::Colmap,
-                Some(prepared.extracted_frames),
-                ObserverMode::BracketProgress,
-            ));
+            let observer = Some(
+                self.process_observer(
+                    PipelineStage::Matching,
+                    PipelineEngine::Colmap,
+                    Some(
+                        state
+                            .frames
+                            .as_ref()
+                            .and_then(|frames| frames.filtered_frames)
+                            .unwrap_or(prepared.extracted_frames),
+                    ),
+                    ObserverMode::BracketProgress,
+                ),
+            );
             if prepared.input_type == ProjectInputType::Images {
                 colmap::match_exhaustive(
                     &self.engines.colmap,
@@ -926,12 +955,20 @@ impl PipelineRunner {
                 &sparse,
                 colmap_log,
                 &self.process_manager,
-                Some(self.process_observer(
-                    PipelineStage::Reconstructing,
-                    PipelineEngine::Colmap,
-                    Some(prepared.extracted_frames),
-                    ObserverMode::Mapper,
-                )),
+                Some(
+                    self.process_observer(
+                        PipelineStage::Reconstructing,
+                        PipelineEngine::Colmap,
+                        Some(
+                            state
+                                .frames
+                                .as_ref()
+                                .and_then(|frames| frames.filtered_frames)
+                                .unwrap_or(prepared.extracted_frames),
+                        ),
+                        ObserverMode::Mapper,
+                    ),
+                ),
             )
             .await?;
             state.stage = PipelineStage::Reconstructing;
@@ -946,7 +983,7 @@ impl PipelineRunner {
             0.0,
             "正在核验注册率和三维点",
         );
-        let (model, report) = best_sparse_model(&paths.frames, &sparse)?;
+        let (model, report) = best_sparse_model(frame_input, &sparse)?;
         let warning = (report.quality == ReconstructionQuality::Warning).then(|| {
             format!(
                 "注册率 {:.1}%：低于 80%，将继续训练，但结果质量可能受影响",
@@ -973,18 +1010,24 @@ impl PipelineRunner {
                 .ok_or_else(|| SplatError::Process("Brush 检查点文件缺失，无法继续发布".into()))?
         } else {
             reset_directory(&paths.brush).await?;
-            let dataset = prepare_brush_dataset(&paths.brush, &paths.frames, &model).await?;
+            let dataset = prepare_brush_dataset(&paths.brush, frame_input, &model).await?;
             let runtime_samples = catalog::runtime_samples().await;
+            let mut estimate_plan = prepared.plan.clone();
+            estimate_plan.estimated_frames = state
+                .frames
+                .as_ref()
+                .and_then(|frames| frames.filtered_frames)
+                .unwrap_or(prepared.extracted_frames);
             let estimated_brush_duration_ms = match (&prepared.video, &prepared.image_sequence) {
                 (Some(video), _) => estimate_calibrated_brush_stage_ms(
                     video,
-                    &prepared.plan,
+                    &estimate_plan,
                     quality,
                     &runtime_samples,
                 ),
                 (_, Some(images)) => estimate_calibrated_brush_stage_ms_for_images(
                     images.image_count,
-                    &prepared.plan,
+                    &estimate_plan,
                     quality,
                     &runtime_samples,
                 ),
@@ -1441,6 +1484,48 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
     Some(output)
 }
 
+async fn copy_filtered_masks(names: &[String], masks: &Path, output: &Path) -> Result<()> {
+    for frame_name in names {
+        let mask_name = format!("{frame_name}.png");
+        let source = masks.join(&mask_name);
+        if !source.is_file() {
+            return Err(SplatError::Process(format!(
+                "筛选帧缺少对应 Alpha Mask：{mask_name}"
+            )));
+        }
+        tokio::fs::copy(source, output.join(mask_name)).await?;
+    }
+    Ok(())
+}
+
+async fn filtered_masks_match_frames(frames: &Path, masks: &Path) -> Result<bool> {
+    let frames = frames.to_path_buf();
+    let masks = masks.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        if !frames.is_dir() || !masks.is_dir() {
+            return Ok(false);
+        }
+        let frame_names = crate::video::list_images(&frames)?
+            .into_iter()
+            .filter_map(|path| path.file_name().map(|name| name.to_os_string()))
+            .collect::<Vec<_>>();
+        for frame_name in &frame_names {
+            let mut mask_name = frame_name.clone();
+            mask_name.push(".png");
+            if !masks.join(mask_name).is_file() {
+                return Ok(false);
+            }
+        }
+        let mask_count = std::fs::read_dir(&masks)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .count();
+        Ok::<bool, SplatError>(mask_count == frame_names.len())
+    })
+    .await
+    .map_err(|error| SplatError::Process(format!("无法校验筛选 Mask：{error}")))?
+}
+
 async fn count_image_files(directory: &Path) -> Result<u64> {
     let directory = directory.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -1479,23 +1564,40 @@ async fn copy_merged_frames(original: &Path, reshoot: &Path, destination: &Path)
 }
 
 async fn normalize_checkpoints(paths: &ProjectPaths, state: &mut PipelineStateFile) -> Result<()> {
-    let frames_complete = prepared_frames_from_checkpoint(paths, state)
-        .await?
-        .is_some();
+    let legacy_overwritten_filter = state.input_type == ProjectInputType::Video
+        && state.preset.preset().enable_smart_filter
+        && state.frames.as_ref().is_some_and(|frames| {
+            frames.filtered_frames.is_none() && frames.filter_config_hash.is_none()
+        })
+        && paths.frames.join("filter_summary.json").is_file();
+    let frames_complete = !legacy_overwritten_filter
+        && prepared_frames_from_checkpoint(paths, state)
+            .await?
+            .is_some();
     if !frames_complete {
         state.video = None;
         state.image_sequence = None;
         state.frames = None;
     }
+    let filter_complete = frames_complete && filter_checkpoint_complete(paths, state).await?;
+    state.filter_complete = filter_complete;
 
     let database_complete = tokio::fs::metadata(paths.colmap.join("database.db"))
         .await
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
-    state.features_complete = frames_complete && state.features_complete && database_complete;
+    state.features_complete = filter_complete && state.features_complete && database_complete;
     state.matching_complete = state.features_complete && state.matching_complete;
     state.reconstruction_complete = state.matching_complete
         && state.reconstruction_complete
-        && best_sparse_model(&paths.frames, &paths.colmap.join("sparse")).is_ok();
+        && best_sparse_model(
+            if smart_filter_enabled(state) {
+                &paths.frames_filtered
+            } else {
+                &paths.frames
+            },
+            &paths.colmap.join("sparse"),
+        )
+        .is_ok();
     state.brush_complete = state.reconstruction_complete
         && state.brush_complete
         && brush_candidate(&paths.brush)
@@ -1503,6 +1605,100 @@ async fn normalize_checkpoints(paths: &ProjectPaths, state: &mut PipelineStateFi
             .is_some();
     state.stage = checkpoint_stage(state);
     Ok(())
+}
+
+fn smart_filter_enabled(state: &PipelineStateFile) -> bool {
+    state.input_type == ProjectInputType::Video && state.preset.preset().enable_smart_filter
+}
+
+async fn filter_checkpoint_complete(
+    paths: &ProjectPaths,
+    state: &PipelineStateFile,
+) -> Result<bool> {
+    let Some(frames) = state.frames.as_ref() else {
+        return Ok(false);
+    };
+    if !smart_filter_enabled(state) {
+        return Ok(true);
+    }
+    let Some(source_frames) = frames.extracted_frames.filter(|count| *count > 0) else {
+        return Ok(false);
+    };
+    let Some(filtered_frames) = frames.filtered_frames.filter(|count| *count > 0) else {
+        return Ok(false);
+    };
+    let expected_hash =
+        crate::video::filter_config_hash(&state.preset.preset().smart_filter_config, source_frames);
+    if frames.filter_config_hash.as_deref() != Some(expected_hash.as_str()) {
+        return Ok(false);
+    }
+    let actual = count_image_files(&paths.frames_filtered).await?;
+    if actual != filtered_frames {
+        return Ok(false);
+    }
+    if frames.has_alpha
+        && !filtered_masks_match_frames(&paths.frames_filtered, &paths.masks_filtered).await?
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+async fn ensure_filter_checkpoint(
+    paths: &ProjectPaths,
+    state: &mut PipelineStateFile,
+    prepared: &PreparedFrames,
+) -> Result<Option<crate::video::FilterOutcome>> {
+    if !smart_filter_enabled(state) {
+        if let Some(frames) = state.frames.as_mut() {
+            frames.filtered_frames = None;
+            frames.filter_config_hash = None;
+        }
+        state.filter_complete = true;
+        return Ok(None);
+    }
+    if filter_checkpoint_complete(paths, state).await? {
+        state.filter_complete = true;
+        return Ok(None);
+    }
+    state.filter_complete = false;
+    reset_directory(&paths.frames_filtered).await?;
+    if prepared.has_alpha {
+        reset_directory(&paths.masks_filtered).await?;
+    }
+    let config = state.preset.preset().smart_filter_config;
+    let input = paths.frames.clone();
+    let output = paths.frames_filtered.clone();
+    let masks = paths.masks.clone();
+    let sampling_fps = prepared.plan.sampling_fps;
+    let has_alpha = prepared.has_alpha;
+    let outcome = tokio::task::spawn_blocking(move || {
+        if has_alpha {
+            filter_frames_with_masks_at_fps(&input, &output, &masks, &config, sampling_fps)
+        } else {
+            crate::video::filter_frames_at_fps(&input, &output, &config, sampling_fps)
+        }
+    })
+    .await
+    .map_err(|error| SplatError::Process(format!("智能抽帧过滤任务失败：{error}")))?
+    .map_err(|error| SplatError::Process(format!("智能抽帧过滤失败：{error}")))?;
+    if prepared.has_alpha {
+        copy_filtered_masks(
+            &outcome.kept_file_names,
+            &paths.masks,
+            &paths.masks_filtered,
+        )
+        .await?;
+    }
+    if let Some(frames) = state.frames.as_mut() {
+        frames.filtered_frames = Some(outcome.kept_frames as u64);
+        frames.filter_config_hash = Some(crate::video::filter_config_hash(
+            &config,
+            prepared.extracted_frames,
+        ));
+    }
+    state.filter_complete = true;
+    Ok(Some(outcome))
 }
 
 async fn prepared_frames_from_checkpoint(
@@ -1624,66 +1820,6 @@ fn best_sparse_model(frames: &Path, sparse: &Path) -> Result<(PathBuf, Reconstru
         }
     }
     best.ok_or_else(|| SplatError::Process("COLMAP 未生成完整的稀疏模型".into()))
-}
-
-/// 用智能过滤后的画面替换原始抽帧结果，并同步裁剪 Alpha Mask 与保留审计产物。
-async fn replace_filtered_frames(
-    frames: &Path,
-    masks: &Path,
-    filtered: &Path,
-    has_alpha: bool,
-) -> Result<()> {
-    let mut entries = tokio::fs::read_dir(frames).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if entry.path().is_file()
-            && entry.path().extension().is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("jpg")
-                    || ext.eq_ignore_ascii_case("jpeg")
-                    || ext.eq_ignore_ascii_case("png")
-            })
-        {
-            tokio::fs::remove_file(entry.path()).await?;
-        }
-    }
-    let mut kept_names = std::collections::HashSet::new();
-    let mut filtered_entries = tokio::fs::read_dir(filtered).await?;
-    while let Some(entry) = filtered_entries.next_entry().await? {
-        let source = entry.path();
-        let name = entry.file_name();
-        if source.is_file()
-            && source.extension().is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("jpg")
-                    || ext.eq_ignore_ascii_case("jpeg")
-                    || ext.eq_ignore_ascii_case("png")
-            })
-        {
-            kept_names.insert(name.to_string_lossy().into_owned());
-            tokio::fs::copy(&source, frames.join(&name)).await?;
-        }
-    }
-    if has_alpha && masks.is_dir() {
-        let mut mask_entries = tokio::fs::read_dir(masks).await?;
-        while let Some(entry) = mask_entries.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(frame_name) = name.strip_suffix(".png") {
-                if !kept_names.contains(frame_name) {
-                    tokio::fs::remove_file(entry.path()).await?;
-                }
-            }
-        }
-    }
-    for name in [
-        "metadata.csv",
-        "filter_summary.json",
-        "filter_forced_keep.log",
-    ] {
-        let source = filtered.join(name);
-        if source.is_file() {
-            tokio::fs::copy(&source, frames.join(name)).await?;
-        }
-    }
-    tokio::fs::remove_dir_all(filtered).await?;
-    Ok(())
 }
 
 async fn prepare_brush_dataset(root: &Path, frames: &Path, model: &Path) -> Result<PathBuf> {
@@ -1838,6 +1974,8 @@ mod tests {
             image_format: Some("jpeg".into()),
             mask_count: Some(0),
             has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
         });
         state.features_complete = true;
         state.matching_complete = true;
@@ -1879,6 +2017,8 @@ mod tests {
             image_format: Some("jpeg".into()),
             mask_count: Some(0),
             has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
         });
 
         assert!(prepared_frames_from_checkpoint(&paths, &state)
@@ -1924,6 +2064,8 @@ mod tests {
             image_format: Some("images".into()),
             mask_count: Some(2),
             has_alpha: true,
+            filtered_frames: None,
+            filter_config_hash: None,
         });
 
         assert!(prepared_frames_from_checkpoint(&paths, &state)
@@ -1971,6 +2113,8 @@ mod tests {
             image_format: Some("png".into()),
             mask_count: Some(1),
             has_alpha: true,
+            filtered_frames: None,
+            filter_config_hash: None,
         });
 
         let prepared = prepared_frames_from_checkpoint(&paths, &state)
@@ -2021,6 +2165,8 @@ mod tests {
             image_format: Some("jpeg".into()),
             mask_count: Some(0),
             has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
         });
         state.features_complete = true;
         state.matching_complete = true;
@@ -2030,6 +2176,162 @@ mod tests {
         assert!(!state.features_complete);
         assert!(!state.matching_complete);
         assert_eq!(state.stage, PipelineStage::ExtractingFrames);
+    }
+
+    #[tokio::test]
+    async fn filter_checkpoint_requires_matching_hash_and_directory_count() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::existing(uuid::Uuid::nil(), temporary.path().to_path_buf());
+        tokio::fs::create_dir_all(&paths.frames_filtered)
+            .await
+            .unwrap();
+        tokio::fs::write(paths.frames_filtered.join("frame_000001.jpg"), b"one")
+            .await
+            .unwrap();
+        let mut state = PipelineStateFile::created(Quality::Balanced);
+        let config = state.preset.preset().smart_filter_config;
+        state.frames = Some(FrameState {
+            retention_ratio: 0.5,
+            sampling_fps: 15.0,
+            estimated_frames: 2,
+            extracted_frames: Some(2),
+            image_format: Some("jpeg".into()),
+            mask_count: Some(0),
+            has_alpha: false,
+            filtered_frames: Some(1),
+            filter_config_hash: Some(crate::video::filter_config_hash(&config, 2)),
+        });
+        assert!(filter_checkpoint_complete(&paths, &state).await.unwrap());
+        state.frames.as_mut().unwrap().filter_config_hash =
+            Some(crate::video::filter_config_hash(&config, 3));
+        assert!(!filter_checkpoint_complete(&paths, &state).await.unwrap());
+        state.frames.as_mut().unwrap().filter_config_hash =
+            Some(crate::video::filter_config_hash(&config, 2));
+        tokio::fs::write(paths.frames_filtered.join("frame_000002.jpg"), b"two")
+            .await
+            .unwrap();
+        assert!(!filter_checkpoint_complete(&paths, &state).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn invalid_filter_checkpoint_invalidates_features_without_invalidating_raw_frames() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::existing(uuid::Uuid::nil(), temporary.path().to_path_buf());
+        tokio::fs::create_dir_all(&paths.frames).await.unwrap();
+        tokio::fs::create_dir_all(&paths.colmap).await.unwrap();
+        tokio::fs::write(paths.frames.join("frame_000001.jpg"), b"jpeg")
+            .await
+            .unwrap();
+        tokio::fs::write(paths.colmap.join("database.db"), b"database")
+            .await
+            .unwrap();
+        let mut state = PipelineStateFile::created(Quality::Balanced);
+        state.video = Some(VideoInfo {
+            duration: 1.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            total_frames: 30,
+            codec: "h264".into(),
+            rotation: 0,
+            pixel_format: "yuv420p".into(),
+            has_alpha: false,
+        });
+        state.frames = Some(FrameState {
+            retention_ratio: 0.5,
+            sampling_fps: 15.0,
+            estimated_frames: 1,
+            extracted_frames: Some(1),
+            image_format: Some("jpeg".into()),
+            mask_count: Some(0),
+            has_alpha: false,
+            filtered_frames: Some(1),
+            filter_config_hash: Some("stale".into()),
+        });
+        state.features_complete = true;
+        state.matching_complete = true;
+        normalize_checkpoints(&paths, &mut state).await.unwrap();
+        assert!(state.frames.is_some());
+        assert!(!state.filter_complete);
+        assert!(!state.features_complete);
+        assert!(!state.matching_complete);
+    }
+
+    #[tokio::test]
+    async fn alpha_filter_checkpoint_requires_exact_mask_pairing() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::existing(uuid::Uuid::nil(), temporary.path().to_path_buf());
+        tokio::fs::create_dir_all(&paths.frames_filtered)
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&paths.masks_filtered)
+            .await
+            .unwrap();
+        tokio::fs::write(paths.frames_filtered.join("frame_000001.png"), b"frame")
+            .await
+            .unwrap();
+        tokio::fs::write(paths.masks_filtered.join("frame_999999.png.png"), b"mask")
+            .await
+            .unwrap();
+        let mut state = PipelineStateFile::created(Quality::Balanced);
+        let config = state.preset.preset().smart_filter_config;
+        state.frames = Some(FrameState {
+            retention_ratio: 0.5,
+            sampling_fps: 15.0,
+            estimated_frames: 1,
+            extracted_frames: Some(1),
+            image_format: Some("png".into()),
+            mask_count: Some(1),
+            has_alpha: true,
+            filtered_frames: Some(1),
+            filter_config_hash: Some(crate::video::filter_config_hash(&config, 1)),
+        });
+        assert!(!filter_checkpoint_complete(&paths, &state).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_overwritten_filter_checkpoint_forces_raw_reextraction() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::existing(uuid::Uuid::nil(), temporary.path().to_path_buf());
+        tokio::fs::create_dir_all(&paths.frames).await.unwrap();
+        tokio::fs::create_dir_all(&paths.colmap).await.unwrap();
+        tokio::fs::write(paths.frames.join("frame_000001.jpg"), b"filtered")
+            .await
+            .unwrap();
+        tokio::fs::write(paths.frames.join("filter_summary.json"), b"{}")
+            .await
+            .unwrap();
+        tokio::fs::write(paths.colmap.join("database.db"), b"database")
+            .await
+            .unwrap();
+        let mut state = PipelineStateFile::created(Quality::Balanced);
+        state.video = Some(VideoInfo {
+            duration: 1.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            total_frames: 30,
+            codec: "h264".into(),
+            rotation: 0,
+            pixel_format: "yuv420p".into(),
+            has_alpha: false,
+        });
+        state.frames = Some(FrameState {
+            retention_ratio: 0.5,
+            sampling_fps: 15.0,
+            estimated_frames: 1,
+            extracted_frames: Some(1),
+            image_format: Some("jpeg".into()),
+            mask_count: Some(0),
+            has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
+        });
+        state.features_complete = true;
+        normalize_checkpoints(&paths, &mut state).await.unwrap();
+        assert!(state.frames.is_none());
+        assert!(!state.filter_complete);
+        assert!(!state.features_complete);
     }
 
     #[test]

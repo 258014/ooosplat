@@ -243,6 +243,10 @@ pub struct FrameState {
     pub mask_count: Option<u64>,
     #[serde(default)]
     pub has_alpha: bool,
+    #[serde(default)]
+    pub filtered_frames: Option<u64>,
+    #[serde(default)]
+    pub filter_config_hash: Option<String>,
 }
 
 impl From<&FramePlan> for FrameState {
@@ -255,6 +259,8 @@ impl From<&FramePlan> for FrameState {
             image_format: None,
             mask_count: None,
             has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
         }
     }
 }
@@ -270,6 +276,8 @@ pub struct PipelineStateFile {
     #[serde(default)]
     pub image_sequence: Option<ImageSequenceInfo>,
     pub frames: Option<FrameState>,
+    #[serde(default)]
+    pub filter_complete: bool,
     pub features_complete: bool,
     pub matching_complete: bool,
     pub reconstruction_complete: bool,
@@ -289,6 +297,7 @@ impl PipelineStateFile {
             input_type,
             image_sequence: None,
             frames: None,
+            filter_complete: false,
             features_complete: false,
             matching_complete: false,
             reconstruction_complete: false,

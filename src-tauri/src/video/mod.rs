@@ -5,8 +5,9 @@ pub mod image_sequence;
 pub mod probe;
 
 pub use frame_filter::{
-    filter_frames, filter_frames_at_fps, filter_frames_with_masks, filter_frames_with_masks_at_fps,
-    FilterOutcome, FrameFilterConfig, FrameFilterError, FrameMetrics,
+    filter_config_hash, filter_frames, filter_frames_at_fps, filter_frames_with_masks,
+    filter_frames_with_masks_at_fps, FilterOutcome, FrameFilterConfig, FrameFilterError,
+    FrameMetrics, FILTER_STRATEGY_VERSION,
 };
 pub use frame_plan::{
     FramePlan, FrameSelectionStrategy, SmartFrameSelection, UniformRatioFrameSelection,

@@ -22,6 +22,8 @@ pub struct ProjectPaths {
     pub work: PathBuf,
     pub frames: PathBuf,
     pub masks: PathBuf,
+    pub frames_filtered: PathBuf,
+    pub masks_filtered: PathBuf,
     pub colmap: PathBuf,
     pub brush: PathBuf,
     pub logs: PathBuf,
@@ -38,6 +40,8 @@ impl ProjectPaths {
             output: project.clone(),
             frames: work.join("frames"),
             masks: work.join("masks"),
+            frames_filtered: work.join("frames_filtered"),
+            masks_filtered: work.join("masks_filtered"),
             colmap: work.join("colmap"),
             brush: work.join("brush"),
             logs: project.join("logs"),
@@ -125,6 +129,8 @@ impl ProjectManager {
         let work = project.join("work");
         let frames = work.join("frames");
         let masks = work.join("masks");
+        let frames_filtered = work.join("frames_filtered");
+        let masks_filtered = work.join("masks_filtered");
         let colmap = work.join("colmap");
         let brush = work.join("brush");
         let logs = project.join("logs");
@@ -189,6 +195,8 @@ impl ProjectManager {
                 work,
                 frames,
                 masks,
+                frames_filtered,
+                masks_filtered,
                 colmap,
                 brush,
                 logs,
