@@ -65,15 +65,36 @@ pub fn detect_cli_family(feature_help: &str, matching_help: &str) -> Option<Colm
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColmapCliCapabilities {
     family: ColmapCliFamily,
+    view_graph_calibrator: bool,
 }
 
 impl ColmapCliCapabilities {
     pub const fn from_family(family: ColmapCliFamily) -> Self {
-        Self { family }
+        Self {
+            family,
+            view_graph_calibrator: false,
+        }
+    }
+
+    const fn with_view_graph_calibrator(self, supported: bool) -> Self {
+        Self {
+            family: self.family,
+            view_graph_calibrator: supported,
+        }
     }
 
     pub const fn family(self) -> ColmapCliFamily {
         self.family
+    }
+
+    /// Whether `view_graph_calibrator` exists in this build.
+    ///
+    /// The global mapper warns that it depends on focal-length priors and
+    /// recommends running this step first. Frames extracted by FFmpeg carry no
+    /// EXIF, so the cameras COLMAP creates start without priors, and this step is
+    /// worth running wherever the subcommand actually exists.
+    pub const fn has_view_graph_calibrator(self) -> bool {
+        self.view_graph_calibrator
     }
 
     fn max_image_size_option(self) -> &'static str {
@@ -186,8 +207,14 @@ pub async fn cli_capabilities(
     }
     let feature_help = command_help(executable, "feature_extractor", manager).await?;
     let matching_help = command_help(executable, "sequential_matcher", manager).await?;
-    let detected =
-        detect_cli_family(&feature_help, &matching_help).map(ColmapCliCapabilities::from_family);
+    // Missing this subcommand is not a capability failure, so it is probed
+    // separately and only recorded as a flag.
+    let view_graph_calibrator = command_help(executable, "view_graph_calibrator", manager)
+        .await
+        .is_ok();
+    let detected = detect_cli_family(&feature_help, &matching_help).map(|family| {
+        ColmapCliCapabilities::from_family(family).with_view_graph_calibrator(view_graph_calibrator)
+    });
     if let Ok(mut entries) = cache.entries.lock() {
         entries.insert(key, detected);
     }
@@ -414,6 +441,42 @@ fn matching_args(
     args
 }
 
+fn view_graph_calibration_args(database: &Path) -> Vec<OsString> {
+    // The calibrator works on the database in place: it estimates intrinsics from
+    // the match graph and records them as focal-length priors, which is the
+    // precondition global_mapper warns about.
+    vec![
+        "view_graph_calibrator".into(),
+        "--database_path".into(),
+        database.into(),
+    ]
+}
+
+/// Estimates camera intrinsics from the match graph and stores them as focal
+/// length priors in the database, for the global mapper that runs next.
+///
+/// COLMAP's own guidance for `global_mapper` is to run this first. It is a
+/// best-effort preparation step: callers treat a failure as non-fatal, because
+/// the global mapper still runs without priors and the registered-ratio check
+/// decides whether the result is usable.
+pub async fn calibrate_view_graph(
+    executable: &Path,
+    database: &Path,
+    log: PathBuf,
+    manager: &ProcessManager,
+    observer: Option<ProcessObserver>,
+) -> Result<()> {
+    run_colmap(
+        executable,
+        view_graph_calibration_args(database),
+        database.parent().unwrap_or(Path::new(".")),
+        log,
+        manager,
+        observer,
+    )
+    .await
+}
+
 pub async fn map(
     executable: &Path,
     database: &Path,
@@ -526,6 +589,24 @@ mod tests {
 
     fn overlap(overlap: u32) -> SequentialMatchingTuning {
         SequentialMatchingTuning { overlap }
+    }
+
+    #[test]
+    fn view_graph_calibration_targets_the_database_in_place() {
+        let calibration = strings(view_graph_calibration_args(Path::new("database.db")));
+        assert_eq!(calibration[0], "view_graph_calibrator");
+        assert!(calibration
+            .windows(2)
+            .any(|pair| pair == ["--database_path", "database.db"]));
+        // The calibrator has no output path: it writes the priors back into the
+        // database the mapper reads next.
+        assert!(!calibration.iter().any(|arg| arg == "--output_path"));
+    }
+
+    #[test]
+    fn capabilities_default_to_no_view_graph_calibrator() {
+        assert!(!modern4().has_view_graph_calibrator());
+        assert_eq!(modern4().family(), ColmapCliFamily::Modern4);
     }
 
     #[test]

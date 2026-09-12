@@ -975,6 +975,45 @@ impl PipelineRunner {
                 ),
             );
             if preferred_backend == colmap::MapperBackend::Global {
+                // The global mapper needs focal-length priors. FFmpeg-extracted
+                // frames carry no EXIF, so the cameras start without priors and
+                // COLMAP itself recommends calibrating the view graph first. The
+                // step is best-effort: without it the mapper still runs, just with
+                // the warning this prevents.
+                let calibrated =
+                    colmap::cli_capabilities(&self.engines.colmap, &self.process_manager)
+                        .await
+                        .map(|capabilities| capabilities.has_view_graph_calibrator())
+                        .unwrap_or(false);
+                if needs_view_graph_calibration(preferred_backend, calibrated) {
+                    match colmap::calibrate_view_graph(
+                        &self.engines.colmap,
+                        &database,
+                        paths.logs.join("colmap_view_graph.log"),
+                        &self.process_manager,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(()) => self.events.stage(
+                            PipelineStage::Reconstructing,
+                            0.05,
+                            "已完成视图图标定，全局重建获得焦距先验",
+                        ),
+                        Err(error) => self.events.send(
+                            PipelineStage::Reconstructing,
+                            Some(PipelineEngine::Colmap),
+                            EventKind::Log,
+                            EventLevel::Warning,
+                            Some(0.05),
+                            false,
+                            format!("视图图标定未完成，继续以原参数重建：{error}"),
+                            None,
+                            None,
+                            None,
+                        ),
+                    }
+                }
                 let global_result = colmap::map_with_backend(
                     colmap::MapperBackend::Global,
                     &self.engines.colmap,
@@ -1710,6 +1749,15 @@ fn smart_filter_enabled(state: &PipelineStateFile) -> bool {
     state.input_type == ProjectInputType::Video && state.preset.preset().enable_smart_filter
 }
 
+/// Whether to calibrate the view graph before mapping.
+///
+/// Only the global mapper consumes focal-length priors; the incremental mapper
+/// initialises and refines intrinsics on its own, so it must not pay for a step
+/// that rewrites the shared database.
+fn needs_view_graph_calibration(backend: colmap::MapperBackend, supports_calibrator: bool) -> bool {
+    backend == colmap::MapperBackend::Global && supports_calibrator
+}
+
 fn pipeline_frame_inputs<'a>(
     paths: &'a ProjectPaths,
     state: &PipelineStateFile,
@@ -2341,6 +2389,25 @@ mod tests {
         assert!(!state.features_complete);
         assert!(!state.matching_complete);
         assert_eq!(state.stage, PipelineStage::ExtractingFrames);
+    }
+
+    #[test]
+    fn view_graph_calibration_only_prepares_the_global_mapper() {
+        // The calibrator rewrites the shared database, so it must never run as
+        // part of an incremental reconstruction that does not consume priors.
+        assert!(needs_view_graph_calibration(
+            colmap::MapperBackend::Global,
+            true
+        ));
+        assert!(!needs_view_graph_calibration(
+            colmap::MapperBackend::Incremental,
+            true
+        ));
+        // A build without the subcommand must not attempt the step at all.
+        assert!(!needs_view_graph_calibration(
+            colmap::MapperBackend::Global,
+            false
+        ));
     }
 
     #[tokio::test]
