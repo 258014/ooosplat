@@ -215,14 +215,36 @@ if ($measurements.Count -eq 0) {
 }
 
 # Log-log least squares on t = a * n^b  =>  ln t = ln a + b ln n
+#
+# A mapper run that exits 0 is not automatically a usable sample: the
+# incremental mapper commonly gives up and exits 0 after registering only a
+# handful of images, and the time it spent failing is not the cost of solving
+# the same problem the global mapper solved. Such points are therefore excluded
+# from the fit and reported, never silently averaged in.
 function Get-PowerFit {
-    param([object[]]$Points)
+    param([object[]]$Points, [double]$MinRegisteredRatio = 0.5)
 
-    $valid = $Points | Where-Object { $_.Frames -gt 0 -and $_.MedianMs -gt 0 }
+    $usable = $Points | Where-Object { $_.Frames -gt 0 -and $_.MedianMs -gt 0 }
+    $valid = $usable | Where-Object {
+        $null -ne $_.Registered -and
+        ($_.Registered / $_.Frames) -ge $MinRegisteredRatio
+    }
+    $excluded = $usable | Where-Object {
+        $null -eq $_.Registered -or
+        ($_.Registered / $_.Frames) -lt $MinRegisteredRatio
+    }
+    $exclusionNotes = @($excluded | ForEach-Object {
+        if ($null -eq $_.Registered) {
+            "$($_.Frames) 帧 / $($_.Backend)：注册数不可用，无法判断该次运行是否真的完成了重建"
+        } else {
+            "$($_.Frames) 帧 / $($_.Backend)：只注册 $($_.Registered)/$($_.Frames)，属于退化运行，其耗时不是有效成本样本"
+        }
+    })
     if ($valid.Count -lt 3) {
         return [pscustomobject]@{
             Coefficient = $null; Exponent = $null; RSquared = $null
-            Points = $valid.Count; Note = '需要至少 3 个有效帧数档才能拟合'
+            Points = $valid.Count; Excluded = $exclusionNotes
+            Note = "需要至少 3 个注册率不低于 $($MinRegisteredRatio.ToString('P0')) 的有效档才能拟合"
         }
     }
     $xs = $valid | ForEach-Object { [math]::Log($_.Frames) }
@@ -253,7 +275,7 @@ function Get-PowerFit {
     $rSquared = if ($syy -gt 0) { 1 - ($ssRes / $syy) } else { 0 }
     return [pscustomobject]@{
         Coefficient = $a; Exponent = $b; RSquared = $rSquared
-        Points = $valid.Count; Note = ''
+        Points = $valid.Count; Excluded = $exclusionNotes; Note = ''
     }
 }
 
@@ -314,6 +336,14 @@ foreach ($backend in @('mapper', 'global_mapper')) {
         }
         if ($fit.Exponent -lt 1) {
             $lines += '- ⚠️ 指数小于 1：重建耗时通常随图像数超线性增长，请确认测量确实隔离了 mapper。'
+        }
+    }
+    if ($fit.Excluded.Count -gt 0) {
+        $lines += ''
+        $lines += '被排除出拟合的档位：'
+        $lines += ''
+        foreach ($note in $fit.Excluded) {
+            $lines += "- $note"
         }
     }
     $lines += ''
