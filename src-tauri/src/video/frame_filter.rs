@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use super::image_sequence::is_image_file;
 
+/// 抽帧策略版本。任何改变筛选语义的改动都必须递增它，并写入 filter_summary.json，
+/// 使下游与断点续跑能够判断已有的审计产物是否由同一套策略生成。
+pub const FILTER_STRATEGY_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameFilterConfig {
@@ -78,6 +82,7 @@ pub struct FrameMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilterOutcome {
+    pub strategy_version: u32,
     pub total_frames: usize,
     pub kept_frames: usize,
     pub rejected_blur: usize,
@@ -193,6 +198,7 @@ fn filter_frames_impl(
     write_metadata(output_dir, &frames)?;
 
     let outcome = FilterOutcome {
+        strategy_version: FILTER_STRATEGY_VERSION,
         total_frames: frames.len(),
         kept_frames: frames.iter().filter(|frame| frame.metrics.kept).count(),
         rejected_blur: frames
@@ -442,7 +448,12 @@ fn decide_windows(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
             }
         }
     }
-    // 第二层兜底循环回填，直到所有相邻保留帧间隔都满足窗口上限。
+    backfill_gaps(frames, config);
+}
+
+/// 第二层兜底：回填相邻保留帧之间的 gap，直到不再存在超过 window_size 的间隔。
+/// 每轮取间隔区间内清晰度最高的一帧标记为 forced_keep，保证时序邻域不被拉断。
+fn backfill_gaps(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
     loop {
         let kept_indices = frames
             .iter()
@@ -455,8 +466,8 @@ fn decide_windows(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
         else {
             break;
         };
-        let range = pair[0] + 1..pair[1];
-        if let Some(index) = range.max_by(|left, right| {
+        let gap = pair[0] + 1..pair[1];
+        if let Some(index) = gap.max_by(|left, right| {
             frames[*left]
                 .metrics
                 .laplacian_variance
@@ -604,6 +615,51 @@ mod tests {
         assert!(csv
             .lines()
             .any(|line| line.contains("frame_000005.png") && line.contains(",false,exposure")));
+    }
+
+    #[test]
+    fn summary_records_the_strategy_version() {
+        let input = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        save_frames(input.path(), 3, &[]);
+        let result = filter_frames(input.path(), output.path(), &config()).unwrap();
+        assert_eq!(result.strategy_version, FILTER_STRATEGY_VERSION);
+        let summary = fs::read_to_string(output.path().join("filter_summary.json")).unwrap();
+        assert!(summary.contains(&format!("\"strategyVersion\": {FILTER_STRATEGY_VERSION}")));
+    }
+
+    #[test]
+    fn all_blurred_windows_use_forced_keep() {
+        let input = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        save_frames(input.path(), 20, &(1..=20).collect::<Vec<_>>());
+        let mut blurred_config = config();
+        blurred_config.blur_threshold = 1_000_000.0;
+
+        let result = filter_frames(input.path(), output.path(), &blurred_config).unwrap();
+        assert_eq!(result.kept_frames, 2);
+        let mut forced_log = fs::read_to_string(output.path().join("filter_forced_keep.log"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let header = forced_log.remove(0);
+        assert_eq!(header, "显式 forced_keep 帧数：2");
+        let forced_numbers = forced_log
+            .iter()
+            .map(|name| frame_number(name))
+            .collect::<Vec<_>>();
+        assert_eq!(forced_numbers.len(), 2);
+        assert!((1..=10).contains(&forced_numbers[0]));
+        assert!((11..=20).contains(&forced_numbers[1]));
+        let metadata = fs::read_to_string(output.path().join("metadata.csv")).unwrap();
+        assert_eq!(
+            metadata
+                .lines()
+                .filter(|line| line.ends_with(",true,"))
+                .count(),
+            2
+        );
     }
 
     #[test]
