@@ -1097,6 +1097,7 @@ impl PipelineRunner {
                 .await?;
             }
             let (_, final_report) = best_sparse_model(frame_input, &sparse)?;
+            ensure_trainable_reconstruction(&final_report)?;
             state.stage = PipelineStage::Reconstructing;
             state.reconstruction_complete = true;
             state.mapper_backend = Some(selected_backend);
@@ -1304,11 +1305,7 @@ impl PipelineRunner {
                         EventLevel::Info,
                         Some(progress),
                         false,
-                        format!(
-                            "Brush 训练中 · 估算进度 {:.0}% · 已用时 {}",
-                            progress * 100.0,
-                            format_duration(elapsed_ms)
-                        ),
+                        brush_progress_message(elapsed_ms, estimated_duration_ms, progress),
                         None,
                         expected_total,
                         Some("estimated_progress"),
@@ -1418,6 +1415,30 @@ enum ObserverMode {
     Brush { estimated_duration_ms: u64 },
 }
 
+/// Rejects a reconstruction that is too degenerate to train on.
+///
+/// COLMAP reports "nothing could be reconstructed" as a successful exit, and a
+/// failed run still leaves a structurally valid sparse directory behind, so the
+/// model itself has to decide whether the run is usable. Without this gate the
+/// pipeline continues into Brush training on a handful of registered images and
+/// spends minutes producing noise from an empty point cloud.
+///
+/// The bar is the same ratio that already triggers the backend fallback, so a
+/// run only fails when neither backend reached the quality the pipeline demands.
+fn ensure_trainable_reconstruction(report: &ReconstructionReport) -> Result<()> {
+    if report.registered_ratio >= GLOBAL_MAPPER_MIN_REGISTERED_RATIO {
+        return Ok(());
+    }
+    Err(SplatError::Process(format!(
+        "重建注册率仅 {:.1}%（{} / {} 张图像），低于 {}% 的可训练下限：两个重建后端都未达标。\
+请检查素材清晰度与重叠度，或改用更充分的匹配参数后重试。",
+        report.registered_ratio * 100.0,
+        report.registered_images,
+        report.input_images,
+        (GLOBAL_MAPPER_MIN_REGISTERED_RATIO * 100.0).round(),
+    )))
+}
+
 fn estimated_brush_progress(elapsed_ms: u64, estimated_duration_ms: u64) -> f32 {
     const MAX_PROGRESS_BEFORE_COMPLETION: f64 = 0.95;
     if estimated_duration_ms == 0 {
@@ -1425,6 +1446,24 @@ fn estimated_brush_progress(elapsed_ms: u64, estimated_duration_ms: u64) -> f32 
     }
     ((elapsed_ms as f64 / estimated_duration_ms as f64) * MAX_PROGRESS_BEFORE_COMPLETION)
         .clamp(0.0, MAX_PROGRESS_BEFORE_COMPLETION) as f32
+}
+
+/// Brush reports no progress of its own, so the bar can only follow a duration
+/// estimate and must stop short of 100% until the process exits. Once the run
+/// passes that estimate the bar stops moving, which reads as a hang — say so
+/// explicitly instead of leaving the user staring at a frozen 95%.
+fn brush_progress_message(elapsed_ms: u64, estimated_duration_ms: u64, progress: f32) -> String {
+    if estimated_duration_ms > 0 && elapsed_ms > estimated_duration_ms {
+        return format!(
+            "Brush 训练中 · 已超过预估时间 · 已用时 {}（训练仍在继续，可查看日志确认）",
+            format_duration(elapsed_ms)
+        );
+    }
+    format!(
+        "Brush 训练中 · 估算进度 {:.0}% · 已用时 {}",
+        progress * 100.0,
+        format_duration(elapsed_ms)
+    )
 }
 
 fn parse_ffmpeg_frame(line: &str) -> Option<u64> {
@@ -1799,6 +1838,32 @@ async fn copy_merged_frames(original: &Path, reshoot: &Path, destination: &Path)
     .map_err(|error| SplatError::Process(format!("融合输入画面失败：{error}")))?
 }
 
+/// Keeps the filter's audit files out of the directory COLMAP scans.
+///
+/// `frames_filtered` is passed to COLMAP as `--image_path`; anything that is not
+/// an image makes the reader log a parse error and inflates the file count it
+/// reports progress against. The CLI path already moves these files next to the
+/// raw frames, so the pipeline does the same.
+async fn relocate_filter_reports(filtered: &Path, frames: &Path) -> Result<()> {
+    for name in [
+        "metadata.csv",
+        "filter_summary.json",
+        "filter_forced_keep.log",
+    ] {
+        let source = filtered.join(name);
+        if !source.is_file() {
+            continue;
+        }
+        let target = frames.join(name);
+        if let Err(error) = tokio::fs::rename(&source, &target).await {
+            return Err(SplatError::Process(format!(
+                "无法移出过滤报告 {name}：{error}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn normalize_checkpoints(paths: &ProjectPaths, state: &mut PipelineStateFile) -> Result<()> {
     let legacy_overwritten_filter = state.input_type == ProjectInputType::Video
         && state.preset.preset().enable_smart_filter
@@ -1991,6 +2056,11 @@ async fn ensure_filter_checkpoint(
         )
         .await?;
     }
+    // The filter writes its report next to the images, but this directory is
+    // handed to COLMAP as --image_path, which tries to read every entry and logs
+    // BITMAP_ERROR for each non-image it finds. Keep the report with the raw
+    // frames instead, exactly as the CLI path does.
+    relocate_filter_reports(&paths.frames_filtered, &paths.frames).await?;
     if let Some(frames) = state.frames.as_mut() {
         frames.filtered_frames = Some(outcome.kept_frames as u64);
         frames.filter_config_hash = Some(crate::video::filter_config_hash(
@@ -2568,6 +2638,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reshoot_source_frames(root).await.unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn filter_reports_leave_the_colmap_image_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let filtered = temporary.path().join("frames_filtered");
+        let frames = temporary.path().join("frames");
+        tokio::fs::create_dir_all(&filtered).await.unwrap();
+        tokio::fs::create_dir_all(&frames).await.unwrap();
+        for name in [
+            "metadata.csv",
+            "filter_summary.json",
+            "filter_forced_keep.log",
+        ] {
+            tokio::fs::write(filtered.join(name), b"report")
+                .await
+                .unwrap();
+        }
+        tokio::fs::write(filtered.join("frame_000001.jpg"), b"image")
+            .await
+            .unwrap();
+
+        relocate_filter_reports(&filtered, &frames).await.unwrap();
+
+        // COLMAP's --image_path must contain images only.
+        let remaining = std::fs::read_dir(&filtered)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, vec!["frame_000001.jpg".to_owned()]);
+        for name in [
+            "metadata.csv",
+            "filter_summary.json",
+            "filter_forced_keep.log",
+        ] {
+            assert!(frames.join(name).is_file(), "{name} should move to frames");
+        }
+
+        // Re-running must stay harmless when the reports are already elsewhere.
+        relocate_filter_reports(&filtered, &frames).await.unwrap();
+    }
+
+    #[test]
+    fn degenerate_reconstructions_never_reach_training() {
+        let report = |registered: u64, input: u64| ReconstructionReport {
+            input_images: input,
+            registered_images: registered,
+            registered_ratio: registered as f64 / input as f64,
+            points_3d: registered * 100,
+            quality: ReconstructionQuality::Warning,
+        };
+
+        // The real failure this guards: a 367-image run that registered 2 images
+        // still produced a sparse directory, and Brush then trained on it four
+        // times. COLMAP exits 0 in that case, so the ratio is the only signal.
+        let degenerate = report(2, 367);
+        let error = ensure_trainable_reconstruction(&degenerate).unwrap_err();
+        assert!(error.to_string().contains("注册率"), "{error}");
+
+        // No images at all is the same verdict.
+        assert!(ensure_trainable_reconstruction(&report(0, 367)).is_err());
+        // The boundary itself is trainable, and so is anything above it.
+        assert!(ensure_trainable_reconstruction(&report(60, 100)).is_ok());
+        assert!(ensure_trainable_reconstruction(&report(59, 100)).is_err());
+        assert!(ensure_trainable_reconstruction(&report(295, 295)).is_ok());
+    }
+
+    #[test]
+    fn brush_progress_message_names_an_overrun_estimate() {
+        // Inside the estimate the bar carries the percentage.
+        let within = brush_progress_message(30_000, 144_000, 0.20);
+        assert!(within.contains("估算进度 20%"), "{within}");
+
+        // Past the estimate the bar is pinned at 95%, so the message has to say
+        // the run is over budget rather than looking frozen.
+        let overrun = brush_progress_message(300_000, 144_000, 0.95);
+        assert!(overrun.contains("已超过预估时间"), "{overrun}");
+        assert!(!overrun.contains("估算进度"), "{overrun}");
+
+        // An unknown estimate must not be reported as an overrun.
+        let unknown = brush_progress_message(300_000, 0, 0.0);
+        assert!(!unknown.contains("已超过预估时间"), "{unknown}");
     }
 
     #[test]
