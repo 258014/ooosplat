@@ -6,7 +6,10 @@ use crate::{engines::colmap::MapperBackend, video::FrameFilterConfig};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MapperPreference {
+    /// Try the global mapper first, falling back to the incremental one when it
+    /// fails, produces an invalid model, or registers fewer than 60% of images.
     PreferGlobal,
+    /// Never try the global mapper.
     ForceIncremental,
 }
 
@@ -128,7 +131,13 @@ impl Quality {
                 brush_tuning: BrushTuning::brush_defaults(),
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::balanced(),
-                mapper_backend: MapperPreference::PreferGlobal,
+                // The global mapper is being trialled on the Fast preset only.
+                // Measured on phone-orbit footage the incremental mapper
+                // registered 3/164 and 7/82 images where the global mapper
+                // registered 164/164 and 78/82, so this tier is expected to
+                // reconstruct worse and to fail outright on such material until
+                // the trial is widened to it.
+                mapper_backend: MapperPreference::ForceIncremental,
                 sequential_overlap: 15,
                 feature_max_image_size: 1600,
                 feature_max_num_features: 8192,
@@ -140,7 +149,8 @@ impl Quality {
                 brush_tuning: BrushTuning::high_detail(),
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::high(),
-                mapper_backend: MapperPreference::PreferGlobal,
+                // Same trial scope as Balanced: see the note there.
+                mapper_backend: MapperPreference::ForceIncremental,
                 sequential_overlap: 20,
                 feature_max_image_size: 2000,
                 feature_max_num_features: 16384,
@@ -220,6 +230,39 @@ mod tests {
         for quality in [Quality::Fast, Quality::Balanced, Quality::High] {
             assert!(quality.preset().feature_max_num_features >= 8192);
         }
+    }
+
+    #[test]
+    fn only_the_fast_preset_trials_the_global_mapper() {
+        // The global mapper is deliberately trialled on one preset first, so a
+        // change that widens or narrows that scope has to be intentional.
+        assert_eq!(
+            Quality::Fast.preset().mapper_backend,
+            MapperPreference::PreferGlobal
+        );
+        assert_eq!(
+            Quality::Balanced.preset().mapper_backend,
+            MapperPreference::ForceIncremental
+        );
+        assert_eq!(
+            Quality::High.preset().mapper_backend,
+            MapperPreference::ForceIncremental
+        );
+
+        // The preference must still degrade safely when the engine has no global
+        // mapper at all.
+        assert_eq!(
+            MapperPreference::PreferGlobal.backend(false),
+            MapperBackend::Incremental
+        );
+        assert_eq!(
+            MapperPreference::PreferGlobal.backend(true),
+            MapperBackend::Global
+        );
+        assert_eq!(
+            MapperPreference::ForceIncremental.backend(true),
+            MapperBackend::Incremental
+        );
     }
 
     #[test]
