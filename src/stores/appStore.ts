@@ -54,7 +54,21 @@ export const useAppStore = create<AppState>((set) => ({
   events: [],
   result: null,
   error: null,
-  setInputPath: (inputPath, inputType) => set({ inputPath, inputType, video: null, imageSequence: null, plan: null, estimate: null, result: null, error: null, progress: 0, phase: "idle" }),
+  setInputPath: (inputPath, inputType) => set({
+    inputPath,
+    inputType,
+    video: null,
+    imageSequence: null,
+    plan: null,
+    estimate: null,
+    phase: "idle",
+    progress: 0,
+    progressMessage: "",
+    latestEvent: null,
+    events: [],
+    result: null,
+    error: null,
+  }),
   setProjectsRoot: (projectsRoot) => set({ projectsRoot }),
   setProjects: (projects) => set({ projects }),
   setQuality: (quality) => set({ quality, plan: null, estimate: null, result: null, error: null }),
@@ -67,10 +81,11 @@ export const useAppStore = create<AppState>((set) => ({
   receiveEvent: (event) => set((state) => {
     if (state.latestEvent && event.sequence > 0 && event.sequence <= state.latestEvent.sequence) return state;
     const events = [...state.events, event].slice(-500);
+    const terminal = event.stage === "failed" || event.stage === "cancelled";
     return {
       events,
       latestEvent: event,
-      progress: Math.max(state.progress, Math.min(100, event.progress)),
+      progress: terminal ? state.progress : Math.max(state.progress, Math.min(100, event.progress)),
       progressMessage: event.message,
       colmapAcceleration: event.acceleration ?? state.colmapAcceleration,
     };

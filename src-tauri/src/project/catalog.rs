@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     error::{Result, SplatError},
-    pipeline::estimate::RuntimeSample,
+    pipeline::{estimate::RuntimeSample, PipelineStage},
     project::{manager::atomic_write_json, ProjectMetadata, ProjectStatus, PROJECT_APP_ID},
     reconstruction::ply::inspect_gaussian_ply,
 };
@@ -112,6 +112,48 @@ pub struct ProjectSummary {
 pub struct ProjectOverview {
     pub projects_root: PathBuf,
     pub projects: Vec<ProjectSummary>,
+}
+
+struct CompletionSnapshot {
+    path: Option<PathBuf>,
+    info: Option<crate::reconstruction::ply::PlyInfo>,
+    marked_complete: bool,
+}
+
+async fn completion_snapshot(root: &Path, metadata: &ProjectMetadata) -> CompletionSnapshot {
+    let direct = root.join("final.ply");
+    let legacy = root.join("output").join("final.ply");
+    let path = if direct.is_file() {
+        Some(direct)
+    } else if legacy.is_file() {
+        Some(legacy)
+    } else {
+        None
+    };
+    let state_completed = match tokio::fs::read(root.join("state.json")).await {
+        Ok(bytes) => serde_json::from_slice::<crate::project::PipelineStateFile>(&bytes)
+            .is_ok_and(|state| state.stage == PipelineStage::Completed),
+        Err(_) => false,
+    };
+    let marked_complete = metadata.status == ProjectStatus::Completed || state_completed;
+    let info = if let Some(path) = path.clone() {
+        tokio::task::spawn_blocking(move || inspect_gaussian_ply(&path).ok())
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    CompletionSnapshot {
+        path,
+        info,
+        marked_complete,
+    }
+}
+
+pub(crate) async fn project_is_durably_completed(root: &Path, metadata: &ProjectMetadata) -> bool {
+    let snapshot = completion_snapshot(root, metadata).await;
+    snapshot.marked_complete && snapshot.info.is_some()
 }
 
 pub(crate) fn app_data_root() -> Result<PathBuf> {
@@ -243,7 +285,7 @@ pub async fn registered_final_ply_for_project(
     id: Uuid,
 ) -> Result<(PathBuf, PathBuf, ProjectMetadata)> {
     let (root, metadata) = load_registered_project(id).await?;
-    if metadata.status != ProjectStatus::Completed {
+    if !project_is_durably_completed(&root, &metadata).await {
         return Err(SplatError::Process("只有已完成的项目可以预览".into()));
     }
     if metadata.model != "final.ply" {
@@ -316,21 +358,15 @@ pub async fn get_overview() -> Result<ProjectOverview> {
 async fn summarize_project(project: &Path) -> Result<ProjectSummary> {
     let bytes = tokio::fs::read(project.join("project.json")).await?;
     let mut metadata: ProjectMetadata = serde_json::from_slice(&bytes)?;
-    let new_ply = project.join("final.ply");
-    let legacy_ply = project.join("output").join("final.ply");
-    let final_ply = if new_ply.is_file() {
-        Some(new_ply)
-    } else if legacy_ply.is_file() {
-        Some(legacy_ply)
-    } else {
-        None
-    };
-    if final_ply.is_some() {
+    let completion = completion_snapshot(project, &metadata).await;
+    let final_ply = completion.path;
+    let completion_inconsistent = completion.marked_complete && completion.info.is_none();
+    if completion.marked_complete && completion.info.is_some() {
         metadata.status = ProjectStatus::Completed;
+    } else if completion_inconsistent {
+        metadata.status = ProjectStatus::Interrupted;
     }
-    let info = final_ply
-        .as_deref()
-        .and_then(|path| inspect_gaussian_ply(path).ok());
+    let info = completion.info;
     let completed_at = metadata.completed_at.or_else(|| {
         final_ply
             .as_ref()
@@ -373,7 +409,11 @@ async fn summarize_project(project: &Path) -> Result<ProjectSummary> {
         source_name,
         registered_ratio: output.map(|v| v.registered_ratio),
         points_3d: output.map(|v| v.points_3d),
-        failure_message: metadata.failure_message,
+        failure_message: if completion_inconsistent {
+            Some("完成记录与 final.ply 不一致，可以继续任务以修复结果".into())
+        } else {
+            metadata.failure_message
+        },
     })
 }
 
@@ -421,6 +461,34 @@ fn has_project_ownership(metadata: &ProjectMetadata, path: &Path, id: Uuid) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_metadata(root: &Path, status: ProjectStatus) -> ProjectMetadata {
+        ProjectMetadata {
+            schema_version: crate::project::metadata::schema_version(),
+            app_id: PROJECT_APP_ID.into(),
+            id: Uuid::new_v4(),
+            name: "test".into(),
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+            status,
+            source_path: root.join("source.mp4"),
+            input_type: crate::project::ProjectInputType::Video,
+            quality: crate::presets::Quality::Balanced,
+            project_path: root.to_path_buf(),
+            output_path: None,
+            output: None,
+            failure_message: None,
+            model: "final.ply".into(),
+            transform: Default::default(),
+            editing: Default::default(),
+        }
+    }
+
+    fn write_valid_ply(path: &Path) {
+        std::fs::write(path, b"ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty float f_dc_0\nproperty float opacity\nproperty float scale_0\nproperty float rot_0\nend_header\n").unwrap();
+    }
     #[test]
     fn default_summary_shape_is_serializable() {
         let value = AppSettings {
@@ -458,6 +526,47 @@ mod tests {
             Some(320)
         );
         assert_eq!(runtime_sample_frame_count(None, Some(0)), None);
+    }
+
+    #[tokio::test]
+    async fn completion_requires_a_marker_and_a_valid_final_ply() {
+        let directory = tempfile::tempdir().unwrap();
+        write_valid_ply(&directory.path().join("final.ply"));
+        let mut metadata = test_metadata(directory.path(), ProjectStatus::Failed);
+        assert!(!project_is_durably_completed(directory.path(), &metadata).await);
+
+        let mut state =
+            crate::project::PipelineStateFile::created(crate::presets::Quality::Balanced);
+        state.stage = PipelineStage::Completed;
+        std::fs::write(
+            directory.path().join("state.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        assert!(project_is_durably_completed(directory.path(), &metadata).await);
+        std::fs::remove_file(directory.path().join("state.json")).unwrap();
+
+        metadata.status = ProjectStatus::Completed;
+        assert!(project_is_durably_completed(directory.path(), &metadata).await);
+
+        std::fs::write(directory.path().join("final.ply"), b"broken").unwrap();
+        assert!(!project_is_durably_completed(directory.path(), &metadata).await);
+    }
+
+    #[tokio::test]
+    async fn inconsistent_completion_is_listed_as_interrupted() {
+        let directory = tempfile::tempdir().unwrap();
+        let metadata = test_metadata(directory.path(), ProjectStatus::Completed);
+        std::fs::write(
+            directory.path().join("project.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("final.ply"), b"broken").unwrap();
+
+        let summary = summarize_project(directory.path()).await.unwrap();
+        assert_eq!(summary.status, ProjectStatus::Interrupted);
+        assert!(summary.failure_message.unwrap().contains("final.ply"));
     }
 
     #[test]

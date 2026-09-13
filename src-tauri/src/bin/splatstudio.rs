@@ -81,7 +81,8 @@ async fn execute(cli: Cli) -> Result<()> {
                     serde_json::to_string_pretty(&analyze_image_sequence(&input)?)?
                 );
             } else {
-                let video = probe_video(&engines.ffprobe, &input, None).await?;
+                let video =
+                    probe_video(&engines.ffprobe, &input, None, &ProcessManager::new()).await?;
                 println!("{}", serde_json::to_string_pretty(&video)?);
             }
         }
@@ -89,7 +90,8 @@ async fn execute(cli: Cli) -> Result<()> {
             let plan = if input.is_dir() {
                 create_image_plan(&analyze_image_sequence(&input)?, &quality.preset())
             } else {
-                let video = probe_video(&engines.ffprobe, &input, None).await?;
+                let video =
+                    probe_video(&engines.ffprobe, &input, None, &ProcessManager::new()).await?;
                 UniformRatioFrameSelection.create_plan(&video, &quality.preset())
             };
             println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -116,7 +118,7 @@ async fn execute(cli: Cli) -> Result<()> {
             }
             ensure_engine(&engines.ffprobe)?;
             ensure_engine(&engines.ffmpeg)?;
-            let video = probe_video(&engines.ffprobe, &input, None).await?;
+            let video = probe_video(&engines.ffprobe, &input, None, &ProcessManager::new()).await?;
             let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
             let extraction = extract_uniform_frames(
                 &engines.ffmpeg,

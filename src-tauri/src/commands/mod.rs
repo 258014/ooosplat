@@ -1,11 +1,11 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
 };
 
 use serde::{Deserialize, Serialize};
 use tauri::{ipc::InvokeBody, Emitter, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -18,9 +18,11 @@ use crate::{
     error::{Result, SplatError},
     pipeline::{
         estimate::{estimate_runtime, estimate_runtime_for_images, RuntimeEstimate},
-        runner::{PipelineResult, PipelineRunner},
+        runner::{PipelineFailureContext, PipelineResult, PipelineRunner},
+        PipelineEngine, PipelineStage,
     },
     presets::Quality,
+    process::ProcessManager,
     project::{
         catalog::{self, AppSettings, ProjectOverview},
         manager::atomic_write_json,
@@ -49,13 +51,146 @@ pub struct PipelineController {
     active: Mutex<Option<Arc<PipelineRunner>>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineCommandError {
+    code: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed_stage: Option<PipelineStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine: Option<PipelineEngine>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logs_directory: Option<PathBuf>,
+}
+
+impl From<SplatError> for PipelineCommandError {
+    fn from(error: SplatError) -> Self {
+        Self {
+            code: if matches!(error, SplatError::Cancelled) {
+                "cancelled"
+            } else {
+                "pipeline_failed"
+            },
+            message: error.to_string(),
+            failed_stage: None,
+            engine: None,
+            failure_kind: None,
+            project_id: None,
+            project_path: None,
+            logs_directory: None,
+        }
+    }
+}
+
+impl PipelineCommandError {
+    fn from_runner(error: SplatError, runner: &PipelineRunner) -> Self {
+        let message = error.to_string();
+        let cancelled = matches!(error, SplatError::Cancelled);
+        let PipelineFailureContext {
+            failed_stage,
+            project_id,
+            project_path,
+            logs_directory,
+        } = runner.failure_context();
+        let (engine, failure_kind) = classify_pipeline_failure(failed_stage, &message);
+        Self {
+            code: if cancelled {
+                "cancelled"
+            } else {
+                "pipeline_failed"
+            },
+            message,
+            failed_stage,
+            engine,
+            failure_kind: if cancelled { None } else { failure_kind },
+            project_id: project_id.map(|value| value.to_string()),
+            project_path,
+            logs_directory,
+        }
+    }
+}
+
+fn classify_pipeline_failure(
+    stage: Option<PipelineStage>,
+    message: &str,
+) -> (Option<PipelineEngine>, Option<&'static str>) {
+    let lower = message.to_ascii_lowercase();
+    match stage {
+        Some(PipelineStage::Reconstructing) => {
+            let storage_error = [
+                "io error",
+                "i/o error",
+                "database",
+                "disk",
+                "no such file",
+                "access denied",
+                "permission denied",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle));
+            (
+                Some(PipelineEngine::Colmap),
+                Some(if storage_error {
+                    "mapper_storage"
+                } else {
+                    "mapper_source"
+                }),
+            )
+        }
+        Some(PipelineStage::TrainingSplats) => {
+            let dataset_error = [
+                "early eof",
+                "failed to load dataset",
+                "io error",
+                "i/o error",
+                "no such file",
+                "access denied",
+                "permission denied",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle));
+            (
+                Some(PipelineEngine::Brush),
+                Some(if dataset_error {
+                    "brush_dataset"
+                } else {
+                    "brush_gpu"
+                }),
+            )
+        }
+        _ => (None, None),
+    }
+}
+
 #[derive(Default)]
 pub struct PreviewController {
     active: Mutex<Option<GaussianPreviewSession>>,
+    lifecycle: Mutex<()>,
     metadata_write: Mutex<()>,
     export: Mutex<()>,
     video_export: Mutex<Option<GaussianVideoExportSession>>,
     edit_save: Mutex<Option<GaussianEditSaveSession>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRuntimeStatus {
+    pipeline_running: bool,
+    preview_project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectLocation {
+    Project,
+    Logs,
 }
 
 #[derive(Debug, Clone)]
@@ -196,7 +331,8 @@ pub async fn probe_and_plan(
             estimate,
         })
     } else {
-        let video = probe_video(&engine_paths.ffprobe, &input, None).await?;
+        let video =
+            probe_video(&engine_paths.ffprobe, &input, None, &ProcessManager::new()).await?;
         let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
         let estimate = estimate_runtime(&video, &plan, quality, &samples);
         Ok(ProbeAndPlan {
@@ -252,7 +388,13 @@ pub async fn estimate_project_runtime(
             let video = match state.video.clone() {
                 Some(video) => video,
                 None => {
-                    probe_video(&paths_for_app(&app).ffprobe, &metadata.source_path, None).await?
+                    probe_video(
+                        &paths_for_app(&app).ffprobe,
+                        &metadata.source_path,
+                        None,
+                        &ProcessManager::new(),
+                    )
+                    .await?
                 }
             };
             let plan = saved_plan.unwrap_or_else(|| {
@@ -339,9 +481,8 @@ pub async fn start_pipeline(
     path: String,
     quality: Quality,
     projects_root: String,
-) -> std::result::Result<PipelineResult, SplatError> {
+) -> std::result::Result<PipelineResult, PipelineCommandError> {
     let emitter = app.clone();
-    let started = Instant::now();
     let telemetry_session = Arc::new(PipelineTelemetrySession::new(
         telemetry.inner().clone(),
         quality,
@@ -359,7 +500,7 @@ pub async fn start_pipeline(
     {
         let mut active = state.active.lock().await;
         if active.is_some() {
-            return Err(SplatError::Process("已有任务正在运行".into()));
+            return Err(SplatError::Process("已有任务正在运行".into()).into());
         }
         *active = Some(runner.clone());
     }
@@ -376,17 +517,10 @@ pub async fn start_pipeline(
         Err(error) => telemetry_session.generation_failed(error),
     }
     if let Err(error) = &result {
-        let stage = if matches!(error, SplatError::Cancelled) {
-            crate::pipeline::PipelineStage::Cancelled
-        } else {
-            crate::pipeline::PipelineStage::Failed
-        };
-        let mut event = crate::pipeline::PipelineEvent::mapped(stage, 1.0, error.to_string());
-        event.elapsed_ms = started.elapsed().as_millis() as u64;
-        let _ = app.emit("pipeline-event", event);
+        runner.emit_terminal(error);
     }
     *state.active.lock().await = None;
-    result
+    result.map_err(|error| PipelineCommandError::from_runner(error, &runner))
 }
 
 #[tauri::command]
@@ -395,11 +529,10 @@ pub async fn resume_pipeline(
     state: State<'_, PipelineController>,
     telemetry: State<'_, TelemetryService>,
     project_id: String,
-) -> std::result::Result<PipelineResult, SplatError> {
+) -> std::result::Result<PipelineResult, PipelineCommandError> {
     let project_id = parse_project_id(&project_id)?;
     let (_, metadata) = catalog::load_registered_project(project_id).await?;
     let emitter = app.clone();
-    let started = Instant::now();
     let telemetry_session = Arc::new(PipelineTelemetrySession::new(
         telemetry.inner().clone(),
         metadata.quality,
@@ -416,7 +549,7 @@ pub async fn resume_pipeline(
     {
         let mut active = state.active.lock().await;
         if active.is_some() {
-            return Err(SplatError::Process("已有任务正在运行".into()));
+            return Err(SplatError::Process("已有任务正在运行".into()).into());
         }
         *active = Some(runner.clone());
     }
@@ -431,17 +564,10 @@ pub async fn resume_pipeline(
         Err(error) => telemetry_session.generation_failed(error),
     }
     if let Err(error) = &result {
-        let stage = if matches!(error, SplatError::Cancelled) {
-            crate::pipeline::PipelineStage::Cancelled
-        } else {
-            crate::pipeline::PipelineStage::Failed
-        };
-        let mut event = crate::pipeline::PipelineEvent::mapped(stage, 1.0, error.to_string());
-        event.elapsed_ms = started.elapsed().as_millis() as u64;
-        let _ = app.emit("pipeline-event", event);
+        runner.emit_terminal(error);
     }
     *state.active.lock().await = None;
-    result
+    result.map_err(|error| PipelineCommandError::from_runner(error, &runner))
 }
 
 #[tauri::command]
@@ -450,6 +576,44 @@ pub async fn cancel_pipeline(state: State<'_, PipelineController>) -> Result<()>
         runner.cancel();
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_app_runtime_status(
+    pipeline: State<'_, PipelineController>,
+    preview: State<'_, PreviewController>,
+) -> Result<AppRuntimeStatus> {
+    let pipeline_running = pipeline.active.lock().await.is_some();
+    let preview_project_id = preview
+        .active
+        .lock()
+        .await
+        .as_ref()
+        .map(|session| session.project_id.to_string());
+    Ok(AppRuntimeStatus {
+        pipeline_running,
+        preview_project_id,
+    })
+}
+
+#[tauri::command]
+pub async fn open_project_location(
+    app: tauri::AppHandle,
+    project_id: String,
+    location: ProjectLocation,
+) -> Result<()> {
+    let id = parse_project_id(&project_id)?;
+    let (project, _) = catalog::load_registered_project(id).await?;
+    let target = match location {
+        ProjectLocation::Project => project,
+        ProjectLocation::Logs => project.join("logs"),
+    };
+    if !target.is_dir() {
+        return Err(SplatError::InvalidPath(target));
+    }
+    app.opener()
+        .open_path(target.to_string_lossy().into_owned(), None::<String>)
+        .map_err(|error| SplatError::Process(format!("无法打开文件夹：{error}")))
 }
 
 #[tauri::command]
@@ -464,16 +628,21 @@ pub async fn delete_project(
     }
     let id =
         Uuid::parse_str(&project_id).map_err(|_| SplatError::Process("项目 ID 无效".into()))?;
-    let mut active = preview.active.lock().await;
-    if active
-        .as_ref()
-        .is_some_and(|session| session.project_id == id)
-    {
-        if let Some(session) = active.take() {
-            discard_preview_asset(&app, session).await;
+    let _lifecycle = preview.lifecycle.lock().await;
+    let session = {
+        let mut active = preview.active.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|session| session.project_id == id)
+        {
+            active.take()
+        } else {
+            None
         }
+    };
+    if let Some(session) = session {
+        discard_preview_asset(&app, session).await;
     }
-    drop(active);
     let mut edit_save = preview.edit_save.lock().await;
     if edit_save
         .as_ref()
@@ -542,6 +711,7 @@ pub async fn prepare_gaussian_preview(
     state: State<'_, PreviewController>,
     project_id: String,
 ) -> Result<GaussianPreviewDescriptor> {
+    let _lifecycle = state.lifecycle.lock().await;
     let id = parse_project_id(&project_id)?;
     let (project_root, path, metadata) = catalog::registered_final_ply_for_project(id).await?;
     let info = inspect_gaussian_ply(&path)?;
@@ -553,8 +723,8 @@ pub async fn prepare_gaussian_preview(
         ))
     })?;
 
-    let mut active = state.active.lock().await;
-    if let Some(previous) = active.take() {
+    let previous = state.active.lock().await.take();
+    if let Some(previous) = previous {
         discard_preview_asset(&app, previous).await;
     }
     let asset_path = create_preview_asset(&project_root, &path).await?;
@@ -579,7 +749,7 @@ pub async fn prepare_gaussian_preview(
     } else {
         None
     };
-    *active = Some(GaussianPreviewSession {
+    *state.active.lock().await = Some(GaussianPreviewSession {
         project_id: id,
         asset_paths,
     });
@@ -603,17 +773,22 @@ pub async fn release_gaussian_preview(
     state: State<'_, PreviewController>,
     project_id: String,
 ) -> Result<()> {
+    let _lifecycle = state.lifecycle.lock().await;
     let id = parse_project_id(&project_id)?;
-    let mut active = state.active.lock().await;
-    if active
-        .as_ref()
-        .is_some_and(|session| session.project_id == id)
-    {
-        if let Some(session) = active.take() {
-            discard_preview_asset(&app, session).await;
+    let session = {
+        let mut active = state.active.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|session| session.project_id == id)
+        {
+            active.take()
+        } else {
+            None
         }
+    };
+    if let Some(session) = session {
+        discard_preview_asset(&app, session).await;
     }
-    drop(active);
 
     let mut edit_save = state.edit_save.lock().await;
     if edit_save
@@ -1045,12 +1220,53 @@ pub async fn export_ply(source_path: String, destination_path: String) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        contains_mp4_ftyp, create_preview_asset, next_gaussian_video_path, preview_client_path,
-        write_gaussian_video, GaussianVideoExportSession,
+        classify_pipeline_failure, contains_mp4_ftyp, create_preview_asset,
+        next_gaussian_video_path, preview_client_path, write_gaussian_video,
+        GaussianVideoExportSession, PipelineCommandError,
     };
+    use crate::error::SplatError;
+    use crate::pipeline::{PipelineEngine, PipelineStage};
     use std::{fs, path::Path};
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    #[test]
+    fn pipeline_errors_have_stable_machine_readable_codes() {
+        let cancelled =
+            serde_json::to_value(PipelineCommandError::from(SplatError::Cancelled)).unwrap();
+        assert_eq!(cancelled["code"], "cancelled");
+        let failed = serde_json::to_value(PipelineCommandError::from(SplatError::Process(
+            "boom".into(),
+        )))
+        .unwrap();
+        assert_eq!(failed["code"], "pipeline_failed");
+        assert!(failed["message"].as_str().unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn classifies_mapper_and_brush_failures_for_plain_language_guidance() {
+        assert_eq!(
+            classify_pipeline_failure(
+                Some(PipelineStage::Reconstructing),
+                "Could not find a good initial image pair",
+            ),
+            (Some(PipelineEngine::Colmap), Some("mapper_source")),
+        );
+        assert_eq!(
+            classify_pipeline_failure(
+                Some(PipelineStage::TrainingSplats),
+                "IO error while loading dataset: early eof",
+            ),
+            (Some(PipelineEngine::Brush), Some("brush_dataset")),
+        );
+        assert_eq!(
+            classify_pipeline_failure(
+                Some(PipelineStage::TrainingSplats),
+                "Device lost while allocating a buffer",
+            ),
+            (Some(PipelineEngine::Brush), Some("brush_gpu")),
+        );
+    }
 
     #[test]
     fn preview_path_keeps_regular_paths() {

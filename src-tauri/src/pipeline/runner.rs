@@ -28,8 +28,8 @@ use crate::{
     presets::Quality,
     process::{ProcessManager, ProcessObserver, ProcessUpdate},
     project::{
-        catalog, FrameState, PipelineStateFile, ProjectInputType, ProjectManager, ProjectMetadata,
-        ProjectOutput, ProjectPaths, ProjectStatus,
+        catalog, manager::atomic_replace_file, FrameState, PipelineStateFile, ProjectInputType,
+        ProjectManager, ProjectMetadata, ProjectOutput, ProjectPaths, ProjectStatus,
     },
     reconstruction::{
         ply::inspect_gaussian_ply,
@@ -76,6 +76,8 @@ pub struct PipelineResult {
 struct EventSink {
     emit: Arc<dyn Fn(PipelineEvent) + Send + Sync>,
     sequence: Arc<AtomicU64>,
+    last_progress_milli_percent: Arc<AtomicU64>,
+    last_stage: Arc<std::sync::Mutex<Option<PipelineStage>>>,
     dispatch: Arc<std::sync::Mutex<()>>,
     started: Instant,
 }
@@ -95,10 +97,23 @@ impl EventSink {
         total: Option<u64>,
         unit: Option<&str>,
     ) {
+        if !matches!(
+            stage,
+            PipelineStage::Completed | PipelineStage::Failed | PipelineStage::Cancelled
+        ) {
+            *self
+                .last_stage
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stage);
+        }
         let (start, end) = stage_progress_range(stage);
         let progress = stage_progress
             .map(|value| start + (end - start) * value.clamp(0.0, 1.0))
             .unwrap_or(start);
+        self.last_progress_milli_percent.fetch_max(
+            (progress.max(0.0) * 1_000.0).round() as u64,
+            Ordering::Relaxed,
+        );
         let _dispatch = self
             .dispatch
             .lock()
@@ -164,12 +179,61 @@ impl EventSink {
             acceleration: Some(status),
         });
     }
+
+    fn terminal(&self, error: &SplatError) {
+        let cancelled = matches!(error, SplatError::Cancelled);
+        let _dispatch = self
+            .dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (self.emit)(PipelineEvent {
+            sequence: self.sequence.fetch_add(1, Ordering::Relaxed) + 1,
+            timestamp: Utc::now(),
+            kind: EventKind::Stage,
+            level: if cancelled {
+                EventLevel::Warning
+            } else {
+                EventLevel::Error
+            },
+            stage: if cancelled {
+                PipelineStage::Cancelled
+            } else {
+                PipelineStage::Failed
+            },
+            engine: Some(PipelineEngine::System),
+            progress: self.last_progress_milli_percent.load(Ordering::Relaxed) as f32 / 1_000.0,
+            stage_progress: None,
+            indeterminate: false,
+            message: error.to_string(),
+            current: None,
+            total: None,
+            unit: None,
+            elapsed_ms: self.started.elapsed().as_millis() as u64,
+            acceleration: None,
+        });
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineFailureContext {
+    pub failed_stage: Option<PipelineStage>,
+    pub project_id: Option<uuid::Uuid>,
+    pub project_path: Option<PathBuf>,
+    pub logs_directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveProjectContext {
+    project_id: uuid::Uuid,
+    project_path: PathBuf,
+    logs_directory: PathBuf,
 }
 
 pub struct PipelineRunner {
     engines: EnginePaths,
     process_manager: ProcessManager,
     events: EventSink,
+    active_project: Arc<std::sync::Mutex<Option<ActiveProjectContext>>>,
 }
 
 impl PipelineRunner {
@@ -180,14 +244,40 @@ impl PipelineRunner {
             events: EventSink {
                 emit: Arc::new(emit),
                 sequence: Arc::new(AtomicU64::new(0)),
+                last_progress_milli_percent: Arc::new(AtomicU64::new(0)),
+                last_stage: Arc::new(std::sync::Mutex::new(None)),
                 dispatch: Arc::new(std::sync::Mutex::new(())),
                 started: Instant::now(),
             },
+            active_project: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     pub fn cancel(&self) {
         self.process_manager.cancel();
+    }
+
+    pub fn emit_terminal(&self, error: &SplatError) {
+        self.events.terminal(error);
+    }
+
+    pub fn failure_context(&self) -> PipelineFailureContext {
+        let failed_stage = *self
+            .events
+            .last_stage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let project = self
+            .active_project
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        PipelineFailureContext {
+            failed_stage,
+            project_id: project.as_ref().map(|value| value.project_id),
+            project_path: project.as_ref().map(|value| value.project_path.clone()),
+            logs_directory: project.map(|value| value.logs_directory),
+        }
     }
 
     pub async fn verify_pipeline_engines(
@@ -237,6 +327,7 @@ impl PipelineRunner {
             &self.engines.ffprobe,
             input,
             logs.map(|path| path.join("ffprobe.log")),
+            &self.process_manager,
         )
         .await?;
         let probe_message = if video.has_alpha {
@@ -435,7 +526,7 @@ impl PipelineRunner {
         let acceleration = self.verify_pipeline_engines().await?;
         self.events.acceleration(acceleration.clone());
         let (project, mut metadata) = catalog::load_registered_project(project_id).await?;
-        if metadata.status == ProjectStatus::Completed || project.join("final.ply").is_file() {
+        if catalog::project_is_durably_completed(&project, &metadata).await {
             return Err(SplatError::Process("该项目已经完成，无需继续".into()));
         }
         let source_available = match metadata.input_type {
@@ -470,6 +561,14 @@ impl PipelineRunner {
         state: PipelineStateFile,
         acceleration: &crate::engines::ColmapAccelerationStatus,
     ) -> Result<PipelineResult> {
+        *self
+            .active_project
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ActiveProjectContext {
+            project_id: paths.id,
+            project_path: paths.project.clone(),
+            logs_directory: paths.logs.clone(),
+        });
         let started = Instant::now();
         let previous_duration = metadata.duration_ms.unwrap_or(0);
         metadata.status = ProjectStatus::Running;
@@ -503,11 +602,7 @@ impl PipelineRunner {
                 .unwrap_or_else(|_| {
                     PipelineStateFile::created_for(metadata.quality, metadata.input_type)
                 });
-            state.stage = if cancelled {
-                PipelineStage::Cancelled
-            } else {
-                PipelineStage::Failed
-            };
+            state = mark_state_terminal(state, cancelled);
             let _ = project_manager.write_state(&paths.state, &state).await;
         }
         result
@@ -527,6 +622,7 @@ impl PipelineRunner {
                 "项目输入类型与检查点不一致，无法安全继续".into(),
             ));
         }
+        recover_interrupted_publish(paths, &state).await?;
         normalize_checkpoints(paths, &mut state).await?;
         project_manager.write_state(&paths.state, &state).await?;
         let prepared = if let Some(prepared) =
@@ -727,7 +823,7 @@ impl PipelineRunner {
             0.0,
             "正在核验注册率和三维点",
         );
-        let (model, report) = best_sparse_model(&paths.frames, &sparse)?;
+        let (model, report) = best_sparse_model(&paths.frames, &sparse).await?;
         let warning = (report.quality == ReconstructionQuality::Warning).then(|| {
             format!(
                 "注册率 {:.1}%：低于 80%，将继续训练，但结果质量可能受影响",
@@ -817,7 +913,7 @@ impl PipelineRunner {
             .stage(PipelineStage::Exporting, 0.0, "正在校验并发布 final.ply");
         let ply = inspect_gaussian_ply(&candidate)?;
         let final_ply = paths.project.join("final.ply");
-        tokio::fs::rename(&candidate, &final_ply).await?;
+        atomic_replace_file(&candidate, &final_ply).await?;
         state.stage = PipelineStage::Completed;
         project_manager.write_state(&paths.state, &state).await?;
 
@@ -1024,10 +1120,23 @@ fn parse_mapper_progress(
     counter: &AtomicU64,
     expected_total: Option<u64>,
 ) -> Option<(u64, Option<u64>, String)> {
-    if let Some(value) =
-        value_after(line, "num_reg_frames=").or_else(|| value_after(line, "num_reg_frames ="))
-    {
-        let current = value.parse().ok()?;
+    let reported_count = value_after(line, "num_reg_frames=")
+        .or_else(|| value_after(line, "num_reg_frames ="))
+        .and_then(|value| value.parse::<u64>().ok());
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("retriangulation") || lower.contains("global bundle adjustment") {
+        if let Some(current) = reported_count {
+            counter.fetch_max(current, Ordering::Relaxed);
+        }
+        let current = counter.load(Ordering::Relaxed);
+        if current > 0 {
+            return Some((current, expected_total, friendly_engine_line(line)));
+        }
+        return None;
+    }
+    if let Some(current) = reported_count {
+        counter.fetch_max(current, Ordering::Relaxed);
+        let current = counter.load(Ordering::Relaxed);
         return Some((current, expected_total, format!("已注册 {current} 张图像")));
     }
     if line.contains("Registering image #") {
@@ -1100,6 +1209,15 @@ fn checkpoint_stage(state: &PipelineStateFile) -> PipelineStage {
     }
 }
 
+fn mark_state_terminal(mut state: PipelineStateFile, cancelled: bool) -> PipelineStateFile {
+    state.stage = if cancelled {
+        PipelineStage::Cancelled
+    } else {
+        PipelineStage::Failed
+    };
+    state
+}
+
 async fn normalize_checkpoints(paths: &ProjectPaths, state: &mut PipelineStateFile) -> Result<()> {
     let frames_complete = prepared_frames_from_checkpoint(paths, state)
         .await?
@@ -1117,7 +1235,9 @@ async fn normalize_checkpoints(paths: &ProjectPaths, state: &mut PipelineStateFi
     state.matching_complete = state.features_complete && state.matching_complete;
     state.reconstruction_complete = state.matching_complete
         && state.reconstruction_complete
-        && best_sparse_model(&paths.frames, &paths.colmap.join("sparse")).is_ok();
+        && best_sparse_model(&paths.frames, &paths.colmap.join("sparse"))
+            .await
+            .is_ok();
     state.brush_complete = state.reconstruction_complete
         && state.brush_complete
         && brush_candidate(&paths.brush)
@@ -1221,6 +1341,32 @@ fn brush_candidate(root: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+async fn recover_interrupted_publish(
+    paths: &ProjectPaths,
+    state: &PipelineStateFile,
+) -> Result<()> {
+    if state.stage == PipelineStage::Completed
+        || !state.brush_complete
+        || brush_candidate(&paths.brush).is_some()
+    {
+        return Ok(());
+    }
+    let orphan = paths.project.join("final.ply");
+    if !orphan.is_file() {
+        return Ok(());
+    }
+    let inspect_path = orphan.clone();
+    if tokio::task::spawn_blocking(move || inspect_gaussian_ply(&inspect_path))
+        .await
+        .map_err(|error| SplatError::Process(format!("PLY 恢复校验任务失败：{error}")))?
+        .is_err()
+    {
+        return Ok(());
+    }
+    tokio::fs::create_dir_all(&paths.brush).await?;
+    atomic_replace_file(&orphan, &paths.brush.join("final.ply.tmp")).await
+}
+
 async fn reset_directory(path: &Path) -> Result<()> {
     if path.exists() {
         tokio::fs::remove_dir_all(path).await?;
@@ -1229,7 +1375,21 @@ async fn reset_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn best_sparse_model(frames: &Path, sparse: &Path) -> Result<(PathBuf, ReconstructionReport)> {
+async fn best_sparse_model(
+    frames: &Path,
+    sparse: &Path,
+) -> Result<(PathBuf, ReconstructionReport)> {
+    let frames = frames.to_path_buf();
+    let sparse = sparse.to_path_buf();
+    tokio::task::spawn_blocking(move || best_sparse_model_blocking(&frames, &sparse))
+        .await
+        .map_err(|error| SplatError::Process(format!("稀疏模型校验任务失败：{error}")))?
+}
+
+fn best_sparse_model_blocking(
+    frames: &Path,
+    sparse: &Path,
+) -> Result<(PathBuf, ReconstructionReport)> {
     let mut best: Option<(PathBuf, ReconstructionReport)> = None;
     for entry in std::fs::read_dir(sparse)? {
         let path = entry?.path();
@@ -1311,6 +1471,37 @@ mod tests {
         assert_eq!(checkpoint_stage(&state), PipelineStage::TrainingSplats);
     }
 
+    #[test]
+    fn terminal_state_preserves_every_checkpoint() {
+        let mut state = PipelineStateFile::created(Quality::Balanced);
+        state.frames = Some(FrameState {
+            retention_ratio: 0.5,
+            sampling_fps: 15.0,
+            estimated_frames: 100,
+            extracted_frames: Some(100),
+            image_format: Some("jpeg".into()),
+            mask_count: Some(0),
+            has_alpha: false,
+        });
+        state.features_complete = true;
+        state.matching_complete = true;
+        state.reconstruction_complete = true;
+        state.brush_complete = true;
+
+        let failed = mark_state_terminal(state.clone(), false);
+        let cancelled = mark_state_terminal(state, true);
+        for terminal in [failed, cancelled] {
+            assert_eq!(
+                terminal.frames.as_ref().unwrap().extracted_frames,
+                Some(100)
+            );
+            assert!(terminal.features_complete);
+            assert!(terminal.matching_complete);
+            assert!(terminal.reconstruction_complete);
+            assert!(terminal.brush_complete);
+        }
+    }
+
     #[tokio::test]
     async fn frame_checkpoint_requires_every_recorded_frame() {
         let temporary = tempfile::tempdir().unwrap();
@@ -1355,6 +1546,23 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn interrupted_publish_restores_a_valid_orphan_as_a_brush_checkpoint() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::existing(uuid::Uuid::nil(), temporary.path().to_path_buf());
+        let valid = b"ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty float f_dc_0\nproperty float opacity\nproperty float scale_0\nproperty float rot_0\nend_header\n";
+        tokio::fs::write(paths.project.join("final.ply"), valid)
+            .await
+            .unwrap();
+        let mut state = PipelineStateFile::created(Quality::Balanced);
+        state.brush_complete = true;
+
+        recover_interrupted_publish(&paths, &state).await.unwrap();
+
+        assert!(!paths.project.join("final.ply").exists());
+        assert!(paths.brush.join("final.ply.tmp").is_file());
     }
 
     #[tokio::test]
@@ -1517,6 +1725,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value.0, 86);
+        assert_eq!(counter.load(Ordering::Relaxed), 86);
+    }
+
+    #[test]
+    fn mapper_refinement_keeps_the_latest_registered_count() {
+        let counter = AtomicU64::new(0);
+        parse_mapper_progress(
+            "Registering image #90 (num_reg_frames=86)",
+            &counter,
+            Some(100),
+        )
+        .unwrap();
+
+        let retriangulation = parse_mapper_progress(
+            "Retriangulation and Global bundle adjustment",
+            &counter,
+            Some(100),
+        )
+        .unwrap();
+        assert_eq!(retriangulation.0, 86);
+        assert_eq!(retriangulation.1, Some(100));
+        assert_eq!(
+            retriangulation.2,
+            "Retriangulation and Global bundle adjustment"
+        );
+
+        let bundle_adjustment =
+            parse_mapper_progress("Global bundle adjustment", &counter, Some(100)).unwrap();
+        assert_eq!(bundle_adjustment.0, 86);
+        assert_eq!(bundle_adjustment.1, Some(100));
+    }
+
+    #[test]
+    fn mapper_refinement_without_a_registration_count_stays_indeterminate() {
+        let counter = AtomicU64::new(0);
+        assert!(parse_mapper_progress(
+            "Retriangulation and Global bundle adjustment",
+            &counter,
+            Some(100),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mapper_registration_count_only_moves_forward() {
+        let counter = AtomicU64::new(0);
+        parse_mapper_progress("num_reg_frames=86", &counter, Some(100)).unwrap();
+        parse_mapper_progress("num_reg_frames=91", &counter, Some(100)).unwrap();
+        parse_mapper_progress("num_reg_frames=89", &counter, Some(100)).unwrap();
+
+        let value = parse_mapper_progress(
+            "Retriangulation and Global bundle adjustment",
+            &counter,
+            Some(100),
+        )
+        .unwrap();
+        assert_eq!(value.0, 91);
     }
 
     #[test]
@@ -1539,11 +1804,39 @@ mod tests {
         let sink = EventSink {
             emit: Arc::new(move |event| captured.lock().unwrap().push(event.sequence)),
             sequence: Arc::new(AtomicU64::new(0)),
+            last_progress_milli_percent: Arc::new(AtomicU64::new(0)),
+            last_stage: Arc::new(std::sync::Mutex::new(None)),
             dispatch: Arc::new(std::sync::Mutex::new(())),
             started: Instant::now(),
         };
         sink.stage(PipelineStage::Created, 0.0, "created");
         sink.stage(PipelineStage::ProbingVideo, 0.0, "probing");
         assert_eq!(*events.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn terminal_event_keeps_the_last_real_progress_and_clears_stage_progress() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let sink = EventSink {
+            emit: Arc::new(move |event| captured.lock().unwrap().push(event)),
+            sequence: Arc::new(AtomicU64::new(0)),
+            last_progress_milli_percent: Arc::new(AtomicU64::new(0)),
+            last_stage: Arc::new(std::sync::Mutex::new(None)),
+            dispatch: Arc::new(std::sync::Mutex::new(())),
+            started: Instant::now(),
+        };
+        sink.stage(PipelineStage::TrainingSplats, 0.5, "training");
+        sink.terminal(&SplatError::Process("boom".into()));
+
+        let events = events.lock().unwrap();
+        assert_eq!(events[0].progress, 79.0);
+        assert_eq!(events[1].progress, 79.0);
+        assert_eq!(events[1].stage_progress, None);
+        assert_eq!(events[1].stage, PipelineStage::Failed);
+        assert_eq!(
+            *sink.last_stage.lock().unwrap(),
+            Some(PipelineStage::TrainingSplats)
+        );
     }
 }

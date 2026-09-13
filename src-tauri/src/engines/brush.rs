@@ -53,9 +53,15 @@ pub async fn train(
         })
         .await?;
     if !output.success {
+        let detail = output.failure_detail();
         return Err(SplatError::Process(format!(
-            "Brush 退出码 {:?}",
-            output.exit_code
+            "Brush 退出码 {:?}{}",
+            output.exit_code,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!("\n{detail}")
+            }
         )));
     }
     let candidate = if candidate.is_file() {

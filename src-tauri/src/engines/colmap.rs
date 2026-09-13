@@ -125,9 +125,15 @@ async fn run_colmap(
     if output.success {
         Ok(())
     } else {
+        let detail = output.failure_detail();
         Err(SplatError::Process(format!(
-            "COLMAP 退出码 {:?}",
-            output.exit_code
+            "COLMAP 退出码 {:?}{}",
+            output.exit_code,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!("\n{detail}")
+            }
         )))
     }
 }

@@ -4,7 +4,8 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LanguageProvider } from "../../i18n";
-import type { GaussianTransform } from "../../types/pipeline";
+import type { GaussianCrop, GaussianTransform } from "../../types/pipeline";
+import { SelectionPanel } from "./SelectionPanel";
 import { TransformPanel } from "./TransformPanel";
 
 function pointerEvent(type: string, x: number) {
@@ -22,7 +23,7 @@ describe("TransformPanel", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    window.localStorage.clear();
+    window.localStorage.setItem("ooo-splat-language", "zh-CN");
   });
 
   afterEach(async () => {
@@ -60,5 +61,40 @@ describe("TransformPanel", () => {
     const uniform = Array.from(container.querySelectorAll<HTMLButtonElement>(".transform-scrubber")).find((button) => button.textContent === "Uniform");
     expect(uniform?.classList.contains("long-label")).toBe(true);
     expect(uniform?.closest(".transform-field")?.classList.contains("long-label")).toBe(true);
+  });
+
+  it("scrubs crop extents above 1000 without snapping to the transform scale limit", async () => {
+    function Harness() {
+      const [crop, setCrop] = useState<GaussianCrop>({ kind: "sphere", center: [0, 0, 0], radius: 1500 });
+      return <SelectionPanel crop={crop} kind="sphere" onBegin={() => {}} onChange={setCrop} onCommit={() => {}} onEnable={() => {}} />;
+    }
+    await act(async () => root.render(<LanguageProvider><Harness /></LanguageProvider>));
+
+    const scrubber = Array.from(container.querySelectorAll<HTMLButtonElement>(".transform-scrubber"))
+      .find((button) => button.textContent === "R");
+    expect(scrubber).toBeDefined();
+    await act(async () => { scrubber?.dispatchEvent(pointerEvent("pointerdown", 100)); });
+    await act(async () => { scrubber?.dispatchEvent(pointerEvent("pointermove", 110)); });
+    await act(async () => { scrubber?.dispatchEvent(pointerEvent("pointerup", 110)); });
+
+    const value = Number(container.querySelector<HTMLInputElement>('[aria-label="球形半径"]')?.value);
+    expect(value).toBeGreaterThan(1500);
+    expect(value).toBeLessThan(1e12);
+  });
+
+  it("rejects crop extents outside the backend range and restores the last value", async () => {
+    const crop: GaussianCrop = { kind: "box", center: [0, 0, 0], size: [1500, 2000, 2500] };
+    await act(async () => root.render(<LanguageProvider><SelectionPanel crop={crop} kind="box" onBegin={() => {}} onChange={() => {}} onCommit={() => {}} onEnable={() => {}} /></LanguageProvider>));
+
+    const input = container.querySelector<HTMLInputElement>('[aria-label="盒形尺寸 X"]')!;
+    await act(async () => { input.focus(); });
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, "10000000000000");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { input.blur(); });
+
+    expect(input.value).toBe("1500");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
   });
 });

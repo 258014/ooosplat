@@ -7,18 +7,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.0"><strong>⬇️ 下载 OOOSplat 0.4.0（Windows / macOS / Ubuntu）</strong></a>
+  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.1"><strong>⬇️ 下载 OOOSplat 0.4.1（Windows / macOS / Ubuntu）</strong></a>
 </p>
 
 OOOSplat 是一款将普通环绕拍摄视频或图片序列一键转换为 3D Gaussian Splatting 的本地桌面应用。选择素材、项目目录和质量档位后，应用会自动完成画面准备、相机重建、训练与 PLY 发布，并可直接预览、调整和导出结果。
 
 Windows 和 Apple Silicon macOS Alpha 均随应用提供 FFmpeg、FFprobe、COLMAP 和 Brush；Linux 支持目前仅作为 Ubuntu 24.04 LTS x86_64 Alpha 提供。整个生成流程使用本机 CPU 和 GPU，输入素材、工程文件、模型与日志无需上传到云端重建或训练服务。React 界面通过 Tauri 直接调用本机 Rust 后端，不需要远程服务或 localhost API。
 
-当前版本：**0.4.0**
+当前版本：**0.4.1**
 
 查看 [OOOSplat Roadmap](ROADMAP.md) 了解后续规划。
 
-> 0.4.0 新增图片序列输入、透明 MOV/PNG 自动 Mask、阶段级断点续跑，以及矩形、球形和盒形 Gaussian 编辑；原始 `final.ply` 始终保留。
+> 0.4.1 支持图片序列输入、透明 MOV/PNG 自动 Mask、阶段级断点续跑，以及矩形、球形和盒形 Gaussian 编辑；原始 `final.ply` 始终保留。
 
 ## 核心优势
 
@@ -127,17 +127,17 @@ sudo apt install -y \
 
 请为显卡安装可用的 Vulkan 驱动（例如 NVIDIA 专有驱动，或 AMD/Intel 的 Mesa 驱动）。Ubuntu 24.04 仓库中的无 CUDA COLMAP 构建会自动使用 CPU；Brush 会在运行时选择可用的图形后端。完全 CPU-only 的软件 Vulkan 后端尚未完成端到端验证。
 
-从 GitHub Actions 下载 `OOOSplat-0.4.0-x64-linux` Artifact 后，可执行：
+从 GitHub Actions 下载 `OOOSplat-0.4.1-x64-linux` Artifact 后，可执行：
 
 ```bash
-sudo apt install ./OOOSplat-0.4.0-x64-linux.deb
+sudo apt install ./OOOSplat-0.4.1-x64-linux.deb
 ```
 
 `.deb` 会通过 Ubuntu 包管理器安装 FFmpeg、FFprobe 和 CPU 版 COLMAP；固定版本 Brush 已包含在安装包中。
 
 ## 安装与使用
 
-1. Windows 运行 `OOOSplat-0.4.0-x64-windows.exe`；Apple Silicon Mac 打开 `OOOSplat-0.4.0-arm64-macos.dmg` 并将 OOOSplat 拖入“应用程序”；Ubuntu 24.04 使用 `sudo apt install ./OOOSplat-0.4.0-x64-linux.deb`。
+1. Windows 运行 `OOOSplat-0.4.1-x64-windows.exe`；Apple Silicon Mac 打开 `OOOSplat-0.4.1-arm64-macos.dmg` 并将 OOOSplat 拖入“应用程序”；Ubuntu 24.04 使用 `sudo apt install ./OOOSplat-0.4.1-x64-linux.deb`。
 2. 启动 OOOSplat，确认顶栏中的内置引擎状态正常；可使用右上角的 `EN / 中文` 按钮即时切换界面语言。
 3. 在“01 创建新任务”的输入类型下拉栏选择“视频”或“图片”，再点击输入框选择视频文件或图片序列文件夹。
 4. 选择项目根目录；程序会记住上次使用的位置。
@@ -206,7 +206,7 @@ OOOSplat 默认开启匿名使用统计，用于了解稳定性和各阶段耗�
 | 字段 | 说明 |
 | --- | --- |
 | 安装 ID | 首次启动生成的随机 UUID，不读取硬件序列号、MAC 地址或设备指纹 |
-| 应用版本、操作系统、CPU 架构 | 例如 `0.4.0` / `windows` / `x86_64` |
+| 应用版本、操作系统、CPU 架构 | 例如 `0.4.1` / `windows` / `x86_64` |
 | 事件名 | `daily_active`、`generation_started`、`generation_completed`、`generation_failed`、`pipeline_stage_completed`。`daily_active` 每天最多一次，应用升级后当天会再报一次 |
 | 质量档位与输入类型 | 枚举值，例如 `balanced` / `video`；图片序列输入报 `images` |
 | 阶段耗时与总耗时 | 毫秒 |
@@ -311,7 +311,7 @@ npm run package:windows
 NSIS 安装包输出到：
 
 ```text
-dist-artifacts\OOOSplat-0.4.0-x64-windows.exe
+dist-artifacts\OOOSplat-0.4.1-x64-windows.exe
 ```
 
 首次构建前必须运行 `npm run setup:engines`。`beforeBuildCommand` 会自动执行引擎校验和前端生产构建，但不会在打包过程中隐式访问网络。

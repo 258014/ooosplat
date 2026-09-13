@@ -241,7 +241,17 @@ mod tests {
             PipelineTelemetrySession::new(service, Quality::Balanced, TelemetryInputType::Video);
         session.observe(&stage_event(PipelineStage::ExtractingFrames, 0.0));
         session.observe(&stage_event(PipelineStage::ExtractingFrames, 100.0));
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        for _ in 0..50 {
+            if events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .any(|value| value["event"] == "pipeline_stage_completed")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
 
         let recorded = events
             .lock()

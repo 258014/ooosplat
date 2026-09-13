@@ -42,14 +42,21 @@ mod windows_job {
     use std::{io, mem::size_of, ptr};
 
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE},
+        Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
         System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                THREADENTRY32,
+            },
             JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
                 SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
-            Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
+            Threading::{
+                OpenProcess, OpenThread, ResumeThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+                THREAD_SUSPEND_RESUME,
+            },
         },
     };
 
@@ -104,6 +111,41 @@ mod windows_job {
             }
         }
 
+        pub fn resume_primary_thread(&self, process_id: u32) -> io::Result<()> {
+            // SAFETY: Snapshot and thread handles are closed on every path, and the
+            // enumeration structure advertises its exact size to Windows.
+            unsafe {
+                let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                if snapshot == INVALID_HANDLE_VALUE {
+                    return Err(io::Error::last_os_error());
+                }
+                let mut entry: THREADENTRY32 = std::mem::zeroed();
+                entry.dwSize = size_of::<THREADENTRY32>() as u32;
+                let mut has_entry = Thread32First(snapshot, &mut entry) != 0;
+                while has_entry {
+                    if entry.th32OwnerProcessID == process_id {
+                        let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                        if thread.is_null() {
+                            let error = io::Error::last_os_error();
+                            CloseHandle(snapshot);
+                            return Err(error);
+                        }
+                        let result = ResumeThread(thread);
+                        let error = (result == u32::MAX).then(io::Error::last_os_error);
+                        CloseHandle(thread);
+                        CloseHandle(snapshot);
+                        return error.map_or(Ok(()), Err);
+                    }
+                    has_entry = Thread32Next(snapshot, &mut entry) != 0;
+                }
+                CloseHandle(snapshot);
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "找不到暂停的子进程主线程",
+                ))
+            }
+        }
+
         pub fn terminate(&self) {
             // SAFETY: self.0 is a live job handle owned by this value.
             unsafe {
@@ -154,6 +196,22 @@ pub struct ProcessOutput {
     pub stderr: String,
 }
 
+impl ProcessOutput {
+    /// Returns a bounded tail of the engine output so command errors retain the
+    /// useful cause without sending an unbounded log through the Tauri bridge.
+    pub fn failure_detail(&self) -> String {
+        const MAX_CHARS: usize = 4_096;
+        let source = if self.stderr.trim().is_empty() {
+            self.stdout.trim()
+        } else {
+            self.stderr.trim()
+        };
+        let mut tail = source.chars().rev().take(MAX_CHARS).collect::<Vec<_>>();
+        tail.reverse();
+        tail.into_iter().collect()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProcessManager {
     cancellation: CancellationToken,
@@ -182,6 +240,10 @@ impl ProcessManager {
         }
 
         let started = Instant::now();
+        #[cfg(windows)]
+        let job = windows_job::WindowsJob::create().map_err(|error| {
+            SplatError::Process(format!("无法创建 Windows Job Object：{error}"))
+        })?;
         let mut command = Command::new(&spec.executable);
         command
             .args(&spec.args)
@@ -195,7 +257,8 @@ impl ProcessManager {
         #[cfg(windows)]
         {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
+            const CREATE_SUSPENDED: u32 = 0x0000_0004;
+            command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         }
 
         #[cfg(unix)]
@@ -211,23 +274,28 @@ impl ProcessManager {
         let process_id = child
             .id()
             .ok_or_else(|| SplatError::Process("无法读取子进程 ID".into()))?;
-        if let Some(observer) = &spec.observer {
-            observer(ProcessUpdate::Started { process_id });
-        }
-
         #[cfg(windows)]
-        let job = {
-            let job = windows_job::WindowsJob::create().map_err(|error| {
-                SplatError::Process(format!("无法创建 Windows Job Object：{error}"))
-            })?;
+        {
             if let Err(error) = job.assign(process_id) {
+                job.terminate();
                 let _ = child.kill().await;
+                let _ = child.wait().await;
                 return Err(SplatError::Process(format!(
                     "无法把子进程加入 Windows Job Object：{error}"
                 )));
             }
-            job
-        };
+            if let Err(error) = job.resume_primary_thread(process_id) {
+                job.terminate();
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(SplatError::Process(format!(
+                    "无法恢复子进程主线程：{error}"
+                )));
+            }
+        }
+        if let Some(observer) = &spec.observer {
+            observer(ProcessUpdate::Started { process_id });
+        }
 
         let log_file = if let Some(path) = &spec.log_path {
             if let Some(parent) = path.parent() {
@@ -387,6 +455,113 @@ async fn pump_stream<R: AsyncRead + Unpin>(
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn failure_detail_prefers_stderr_and_keeps_only_a_bounded_tail() {
+        let output = ProcessOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: "less useful stdout".into(),
+            stderr: format!("{}early eof", "x".repeat(5_000)),
+        };
+        let detail = output.failure_detail();
+        assert!(detail.ends_with("early eof"));
+        assert_eq!(detail.chars().count(), 4_096);
+        assert!(!detail.contains("less useful stdout"));
+    }
+
+    #[cfg(windows)]
+    fn system_executable(name: &str) -> PathBuf {
+        PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+            .join("System32")
+            .join(name)
+    }
+
+    #[cfg(windows)]
+    fn process_has_exited(process_id: u32) -> bool {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{OpenProcess, WaitForSingleObject},
+        };
+        // SAFETY: The process handle is opened only for synchronization, checked for null,
+        // observed without blocking, and closed exactly once.
+        unsafe {
+            const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+            let process = OpenProcess(SYNCHRONIZE_ACCESS, 0, process_id);
+            if process.is_null() {
+                return true;
+            }
+            let result = WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+            CloseHandle(process);
+            result
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn suspended_windows_process_is_resumed_after_job_assignment() {
+        let output = ProcessManager::new()
+            .run(ProcessSpec {
+                executable: system_executable("cmd.exe"),
+                args: vec!["/C".into(), "echo resumed".into()],
+                working_directory: None,
+                log_path: None,
+                observer: None,
+            })
+            .await
+            .unwrap();
+        assert!(output.success);
+        assert!(output.stdout.contains("resumed"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cancellation_terminates_a_windows_descendant_created_immediately() {
+        let descendant_pid = Arc::new(std::sync::Mutex::new(None::<u32>));
+        let observer: ProcessObserver = {
+            let descendant_pid = descendant_pid.clone();
+            Arc::new(move |update| {
+                if let ProcessUpdate::Line { line, .. } = update {
+                    if let Ok(pid) = line.parse() {
+                        *descendant_pid.lock().unwrap() = Some(pid);
+                    }
+                }
+            })
+        };
+        let manager = ProcessManager::new();
+        let running_manager = manager.clone();
+        let run = tokio::spawn(async move {
+            running_manager
+                .run(ProcessSpec {
+                    executable: system_executable("WindowsPowerShell\\v1.0\\powershell.exe"),
+                    args: vec![
+                        "-NoProfile".into(),
+                        "-Command".into(),
+                        "$p = Start-Process -PassThru -WindowStyle Hidden ping -ArgumentList '-t','127.0.0.1'; $p.Id; Wait-Process -Id $p.Id".into(),
+                    ],
+                    working_directory: None,
+                    log_path: None,
+                    observer: Some(observer),
+                })
+                .await
+        });
+        for _ in 0..100 {
+            if descendant_pid.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let process_id = descendant_pid.lock().unwrap().expect("descendant PID");
+        manager.cancel();
+        assert!(matches!(run.await.unwrap(), Err(SplatError::Cancelled)));
+        for _ in 0..100 {
+            if process_has_exited(process_id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("descendant {process_id} escaped the Windows Job Object");
+    }
 
     #[tokio::test]
     async fn streams_stdout_and_stderr_concurrently_and_persists_log() {

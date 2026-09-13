@@ -108,6 +108,7 @@ export interface ProjectSummary {
 }
 
 export interface ProjectOverview { projectsRoot: string; projects: ProjectSummary[]; }
+export interface AppRuntimeStatus { pipelineRunning: boolean; previewProjectId: string | null; }
 
 export type GaussianFormat = "ply" | "sog" | "spz";
 export interface GaussianTransform {

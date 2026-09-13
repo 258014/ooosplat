@@ -846,9 +846,10 @@ const phaseLabelKeys: Record<PreviewAnimationPhase, TranslationKey> = {
   orbit: "animation.orbit",
 };
 
-export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
+export function GaussianViewer({ previewSessionId, onExit, onDisposed, pipelineRunning }: {
+  previewSessionId: number;
   onExit: () => void | Promise<void>;
-  onDisposed: (projectId: string) => void;
+  onDisposed: (projectId: string, previewSessionId: number) => void;
   pipelineRunning: boolean;
 }) {
   const { locale, t, formatNumber } = useI18n();
@@ -1056,9 +1057,9 @@ export function GaussianViewer({ onExit, onDisposed, pipelineRunning }: {
     const projectId = store.descriptor?.projectId;
     if (!projectId) return;
     return () => {
-      queueMicrotask(() => onDisposed(projectId));
+      window.setTimeout(() => onDisposed(projectId, previewSessionId), 0);
     };
-  }, [onDisposed, store.descriptor?.projectId]);
+  }, [onDisposed, previewSessionId, store.descriptor?.projectId]);
 
   const exportGaussian = async (): Promise<boolean> => {
     if (!store.descriptor || busy) return false;
