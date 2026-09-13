@@ -65,9 +65,9 @@ pub struct PipelineCommandError {
     #[serde(skip_serializing_if = "Option::is_none")]
     project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    project_path: Option<PathBuf>,
+    project_path: Option<Box<PathBuf>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    logs_directory: Option<PathBuf>,
+    logs_directory: Option<Box<PathBuf>>,
 }
 
 impl From<SplatError> for PipelineCommandError {
@@ -111,8 +111,8 @@ impl PipelineCommandError {
             engine,
             failure_kind: if cancelled { None } else { failure_kind },
             project_id: project_id.map(|value| value.to_string()),
-            project_path,
-            logs_directory,
+            project_path: project_path.map(Box::new),
+            logs_directory: logs_directory.map(Box::new),
         }
     }
 }
@@ -1241,6 +1241,11 @@ mod tests {
         .unwrap();
         assert_eq!(failed["code"], "pipeline_failed");
         assert!(failed["message"].as_str().unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn pipeline_command_error_stays_below_clippy_large_error_threshold() {
+        assert!(std::mem::size_of::<PipelineCommandError>() <= 128);
     }
 
     #[test]
