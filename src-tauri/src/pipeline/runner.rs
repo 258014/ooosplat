@@ -467,7 +467,7 @@ impl PipelineRunner {
                 "只能为已完成且包含 final.ply 的项目创建高清补拍".into(),
             ));
         }
-        let source_frames = source_root.join("work").join("frames");
+        let source_frames = reshoot_source_frames(&source_root).await?;
         if !source_frames.is_dir() {
             return Err(SplatError::Process(
                 "原项目缺少可复用的输入画面，无法融合补拍素材".into(),
@@ -663,115 +663,119 @@ impl PipelineRunner {
         }
         normalize_checkpoints(paths, &mut state).await?;
         project_manager.write_state(&paths.state, &state).await?;
-        let prepared =
-            if let Some(prepared) = prepared_frames_from_checkpoint(paths, &state).await? {
-                self.events.stage(
-                    PipelineStage::ExtractingFrames,
-                    1.0,
-                    format!("已复用 {} 帧检查点", prepared.extracted_frames),
-                );
-                prepared
+        let prepared = if let Some(prepared) =
+            prepared_frames_from_checkpoint(paths, &state).await?
+        {
+            self.events.stage(
+                PipelineStage::ExtractingFrames,
+                1.0,
+                format!("已复用 {} 帧检查点", prepared.extracted_frames),
+            );
+            prepared
+        } else {
+            reset_directory(&paths.colmap).await?;
+            reset_directory(&paths.brush).await?;
+            let prepared = if let Some(provenance) = metadata.reshoot.as_ref() {
+                // The same frame set the first attempt merged, so a resumed
+                // reshoot keeps the same matching cost instead of silently
+                // falling back to the larger raw set.
+                let source_frames = reshoot_source_frames(&provenance.source_project_path).await?;
+                if !source_frames.is_dir() {
+                    return Err(SplatError::Process(
+                        "原项目输入画面已缺失，无法继续高清补拍".into(),
+                    ));
+                }
+                reset_directory(&paths.frames).await?;
+                reset_directory(&paths.masks).await?;
+                let reshoot_frames = paths.work.join("reshoot-recovery-frames");
+                let reshoot_masks = paths.work.join("reshoot-recovery-masks");
+                reset_directory(&reshoot_frames).await?;
+                reset_directory(&reshoot_masks).await?;
+                let recovered_reshoot = if metadata.source_path.is_dir() {
+                    self.prepare_images(
+                        &metadata.source_path,
+                        quality,
+                        &reshoot_frames,
+                        &reshoot_masks,
+                    )
+                    .await?
+                } else {
+                    self.prepare_frames(
+                        &metadata.source_path,
+                        quality,
+                        &reshoot_frames,
+                        &reshoot_masks,
+                        Some(&paths.logs),
+                    )
+                    .await?
+                };
+                if recovered_reshoot.has_alpha {
+                    return Err(SplatError::Process("高清补拍恢复不支持透明素材".into()));
+                }
+                copy_merged_frames(&source_frames, &reshoot_frames, &paths.frames).await?;
+                let extracted_frames = count_image_files(&paths.frames).await?;
+                PreparedFrames {
+                    input_type: ProjectInputType::Images,
+                    video: None,
+                    image_sequence: Some(ImageSequenceInfo {
+                        image_count: extracted_frames,
+                        width: 0,
+                        height: 0,
+                        has_alpha: false,
+                        requires_large_sequence_confirmation: false,
+                    }),
+                    plan: FramePlan {
+                        retention_ratio: 1.0,
+                        sampling_fps: 0.0,
+                        estimated_frames: extracted_frames,
+                    },
+                    extracted_frames,
+                    image_format: "merged".into(),
+                    mask_count: 0,
+                    has_alpha: false,
+                }
             } else {
-                reset_directory(&paths.colmap).await?;
-                reset_directory(&paths.brush).await?;
-                let prepared = if let Some(provenance) = metadata.reshoot.as_ref() {
-                    let source_frames = provenance.source_project_path.join("work").join("frames");
-                    if !source_frames.is_dir() {
-                        return Err(SplatError::Process(
-                            "原项目输入画面已缺失，无法继续高清补拍".into(),
-                        ));
-                    }
-                    reset_directory(&paths.frames).await?;
-                    reset_directory(&paths.masks).await?;
-                    let reshoot_frames = paths.work.join("reshoot-recovery-frames");
-                    let reshoot_masks = paths.work.join("reshoot-recovery-masks");
-                    reset_directory(&reshoot_frames).await?;
-                    reset_directory(&reshoot_masks).await?;
-                    let recovered_reshoot = if metadata.source_path.is_dir() {
-                        self.prepare_images(
-                            &metadata.source_path,
-                            quality,
-                            &reshoot_frames,
-                            &reshoot_masks,
-                        )
-                        .await?
-                    } else {
+                reset_directory(&paths.frames).await?;
+                reset_directory(&paths.masks).await?;
+                match metadata.input_type {
+                    ProjectInputType::Video => {
                         self.prepare_frames(
                             &metadata.source_path,
                             quality,
-                            &reshoot_frames,
-                            &reshoot_masks,
+                            &paths.frames,
+                            &paths.masks,
                             Some(&paths.logs),
                         )
                         .await?
-                    };
-                    if recovered_reshoot.has_alpha {
-                        return Err(SplatError::Process("高清补拍恢复不支持透明素材".into()));
                     }
-                    copy_merged_frames(&source_frames, &reshoot_frames, &paths.frames).await?;
-                    let extracted_frames = count_image_files(&paths.frames).await?;
-                    PreparedFrames {
-                        input_type: ProjectInputType::Images,
-                        video: None,
-                        image_sequence: Some(ImageSequenceInfo {
-                            image_count: extracted_frames,
-                            width: 0,
-                            height: 0,
-                            has_alpha: false,
-                            requires_large_sequence_confirmation: false,
-                        }),
-                        plan: FramePlan {
-                            retention_ratio: 1.0,
-                            sampling_fps: 0.0,
-                            estimated_frames: extracted_frames,
-                        },
-                        extracted_frames,
-                        image_format: "merged".into(),
-                        mask_count: 0,
-                        has_alpha: false,
+                    ProjectInputType::Images => {
+                        self.prepare_images(
+                            &metadata.source_path,
+                            quality,
+                            &paths.frames,
+                            &paths.masks,
+                        )
+                        .await?
                     }
-                } else {
-                    reset_directory(&paths.frames).await?;
-                    reset_directory(&paths.masks).await?;
-                    match metadata.input_type {
-                        ProjectInputType::Video => {
-                            self.prepare_frames(
-                                &metadata.source_path,
-                                quality,
-                                &paths.frames,
-                                &paths.masks,
-                                Some(&paths.logs),
-                            )
-                            .await?
-                        }
-                        ProjectInputType::Images => {
-                            self.prepare_images(
-                                &metadata.source_path,
-                                quality,
-                                &paths.frames,
-                                &paths.masks,
-                            )
-                            .await?
-                        }
-                    }
-                };
-                state.input_type = prepared.input_type;
-                state.video = prepared.video.clone();
-                state.image_sequence = prepared.image_sequence.clone();
-                let mut frames = FrameState::from(&prepared.plan);
-                frames.extracted_frames = Some(prepared.extracted_frames);
-                frames.image_format = Some(prepared.image_format.clone());
-                frames.mask_count = Some(prepared.mask_count);
-                frames.has_alpha = prepared.has_alpha;
-                state.frames = Some(frames);
-                state.features_complete = false;
-                state.matching_complete = false;
-                state.reconstruction_complete = false;
-                state.brush_complete = false;
-                state.stage = PipelineStage::ExtractingFrames;
-                project_manager.write_state(&paths.state, &state).await?;
-                prepared
+                }
             };
+            state.input_type = prepared.input_type;
+            state.video = prepared.video.clone();
+            state.image_sequence = prepared.image_sequence.clone();
+            let mut frames = FrameState::from(&prepared.plan);
+            frames.extracted_frames = Some(prepared.extracted_frames);
+            frames.image_format = Some(prepared.image_format.clone());
+            frames.mask_count = Some(prepared.mask_count);
+            frames.has_alpha = prepared.has_alpha;
+            state.frames = Some(frames);
+            state.features_complete = false;
+            state.matching_complete = false;
+            state.reconstruction_complete = false;
+            state.brush_complete = false;
+            state.stage = PipelineStage::ExtractingFrames;
+            project_manager.write_state(&paths.state, &state).await?;
+            prepared
+        };
         let source_duration_seconds = prepared.video.as_ref().map(|video| video.duration);
         let filter_result = ensure_filter_checkpoint(paths, &mut state, &prepared).await?;
         project_manager.write_state(&paths.state, &state).await?;
@@ -1741,6 +1745,23 @@ async fn filtered_masks_match_frames(frames: &Path, masks: &Path) -> Result<bool
     .map_err(|error| SplatError::Process(format!("无法校验筛选 Mask：{error}")))?
 }
 
+/// Frames a reshoot project merges from its source project.
+///
+/// The smart filter already dropped the frames the original reconstruction never
+/// used, and a reshoot project matches exhaustively because its new photos are
+/// not temporally adjacent to the video frames. Merging the raw set back in would
+/// therefore square the matching cost over frames that never contributed to the
+/// source model, so the filtered set wins whenever the source produced one. Image
+/// sequence sources are never filtered and fall back to their raw frames.
+async fn reshoot_source_frames(project_root: &Path) -> Result<PathBuf> {
+    let work = project_root.join("work");
+    let filtered = work.join("frames_filtered");
+    if count_image_files(&filtered).await.unwrap_or(0) > 0 {
+        return Ok(filtered);
+    }
+    Ok(work.join("frames"))
+}
+
 async fn count_image_files(directory: &Path) -> Result<u64> {
     let directory = directory.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -2514,6 +2535,39 @@ mod tests {
         // Knobs that stay unset must not be advertised as if they were applied.
         assert!(!note.contains("细化间隔"), "{note}");
         assert!(!note.contains("高斯上限"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn reshoot_prefers_the_filtered_frames_of_its_source() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let raw = root.join("work").join("frames");
+        tokio::fs::create_dir_all(&raw).await.unwrap();
+        for index in 0..4 {
+            tokio::fs::write(raw.join(format!("frame_{index:06}.jpg")), b"raw")
+                .await
+                .unwrap();
+        }
+
+        // Without a filtered set, an image-sequence source has to fall back to
+        // its raw frames.
+        assert_eq!(reshoot_source_frames(root).await.unwrap(), raw);
+
+        // With one, the reshoot merges only what the source reconstruction used,
+        // because the derived project matches exhaustively and merging the raw
+        // set back in would square that cost over frames that never contributed.
+        let filtered = root.join("work").join("frames_filtered");
+        tokio::fs::create_dir_all(&filtered).await.unwrap();
+        tokio::fs::write(filtered.join("frame_000001.jpg"), b"kept")
+            .await
+            .unwrap();
+        assert_eq!(reshoot_source_frames(root).await.unwrap(), filtered);
+
+        // An empty filtered directory must not win over usable raw frames.
+        tokio::fs::remove_file(filtered.join("frame_000001.jpg"))
+            .await
+            .unwrap();
+        assert_eq!(reshoot_source_frames(root).await.unwrap(), raw);
     }
 
     #[test]
