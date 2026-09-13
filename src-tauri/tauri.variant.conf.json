@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OOOSplat Dev",
+  "productName": "OOOSplat 试验版",
   "identifier": "studio.ooo.splat.dev",
   "mainBinaryName": "ooo-splat-dev",
   "app": {
     "windows": [
       {
-        "title": "OOOSplat Dev",
+        "title": "OOOSplat 试验版",
         "width": 1500,
         "height": 850,
         "minWidth": 1100,
