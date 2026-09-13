@@ -153,9 +153,21 @@ pub struct ProjectOverview {
     pub projects: Vec<ProjectSummary>,
 }
 
+/// Folder name used for this build's settings, project index and default
+/// projects root.
+///
+/// A second, independently installed build sets `OOOSPLAT_DATA_DIR` at compile
+/// time so it keeps its own settings and project list instead of sharing the
+/// installed product's. Builds without that variable keep the original name, so
+/// existing installations are unaffected.
+const APP_DATA_DIR: &str = match option_env!("OOOSPLAT_DATA_DIR") {
+    Some(name) => name,
+    None => "SplatStudio",
+};
+
 pub(crate) fn app_data_root() -> Result<PathBuf> {
     dirs::data_local_dir()
-        .map(|v| v.join("SplatStudio"))
+        .map(|v| v.join(APP_DATA_DIR))
         .ok_or_else(|| SplatError::Process("无法定位本机应用数据目录".into()))
 }
 fn settings_path() -> Result<PathBuf> {
@@ -166,7 +178,7 @@ fn index_path() -> Result<PathBuf> {
 }
 pub fn default_projects_root() -> Result<PathBuf> {
     dirs::document_dir()
-        .map(|v| v.join("SplatStudio").join("Projects"))
+        .map(|v| v.join(APP_DATA_DIR).join("Projects"))
         .ok_or_else(|| SplatError::Process("无法定位 Documents 目录".into()))
 }
 
