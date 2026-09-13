@@ -11,9 +11,12 @@ import type { ProjectSummary } from "../types/pipeline";
 const mocks = vi.hoisted(() => ({
   cancelPipeline: vi.fn(),
   estimateProjectRuntime: vi.fn(),
+  exportPly: vi.fn(),
   prepareGaussianPreview: vi.fn(),
   releaseGaussianPreview: vi.fn(),
+  revealFile: vi.fn(),
   resumePipeline: vi.fn(),
+  getAppRuntimeStatus: vi.fn(),
   getProjectOverview: vi.fn(),
   initializeTelemetry: vi.fn(),
   setTelemetryConsent: vi.fn(),
@@ -22,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   probeAndPlan: vi.fn(),
   confirmLargeImageSequence: vi.fn(),
   startPipeline: vi.fn(),
+  revealProject: vi.fn(),
+  revealProjectLogs: vi.fn(),
   notifyPreviewDisposed: vi.fn(),
 }));
 
@@ -31,6 +36,8 @@ vi.mock("../lib/backend", () => ({
   confirmAndDeleteProject: vi.fn().mockResolvedValue(false),
   confirmLargeImageSequence: mocks.confirmLargeImageSequence,
   estimateProjectRuntime: mocks.estimateProjectRuntime,
+  exportPly: mocks.exportPly,
+  getAppRuntimeStatus: mocks.getAppRuntimeStatus,
   getProjectOverview: mocks.getProjectOverview,
   initializeTelemetry: mocks.initializeTelemetry,
   onPipelineEvent: vi.fn().mockResolvedValue(() => undefined),
@@ -38,7 +45,9 @@ vi.mock("../lib/backend", () => ({
   probeAndPlan: mocks.probeAndPlan,
   releaseGaussianPreview: mocks.releaseGaussianPreview,
   resumePipeline: mocks.resumePipeline,
-  revealProject: vi.fn(),
+  revealProject: mocks.revealProject,
+  revealProjectLogs: mocks.revealProjectLogs,
+  revealFile: mocks.revealFile,
   selectProjectsRoot: vi.fn(),
   selectImageSequence: mocks.selectImageSequence,
   selectVideo: mocks.selectVideo,
@@ -48,9 +57,9 @@ vi.mock("../lib/backend", () => ({
 }));
 
 vi.mock("../components/GaussianViewer", () => ({
-  GaussianViewer: ({ onExit, onDisposed, reshootEntry }: { onExit: () => void | Promise<void>; onDisposed: (projectId: string) => void; reshootEntry?: boolean }) => <section className="preview-workspace"><h1>高斯泼溅预览</h1><span data-testid="reshoot-entry">{String(Boolean(reshootEntry))}</span><button type="button" onClick={() => {
+  GaussianViewer: ({ previewSessionId, onExit, onDisposed, reshootEntry }: { previewSessionId: number; onExit: () => void | Promise<void>; onDisposed: (projectId: string, previewSessionId: number) => void; reshootEntry?: boolean }) => <section className="preview-workspace"><h1>高斯泼溅预览</h1><span data-testid="reshoot-entry">{String(Boolean(reshootEntry))}</span><button type="button" onClick={() => {
     void onExit();
-    mocks.notifyPreviewDisposed(onDisposed, "11111111-1111-1111-1111-111111111111");
+    mocks.notifyPreviewDisposed(onDisposed, "11111111-1111-1111-1111-111111111111", previewSessionId);
   }}>返回任务</button></section>,
 }));
 
@@ -112,6 +121,14 @@ describe("App preview workspace", () => {
       basis: "按同档位历史任务校准",
     });
     mocks.releaseGaussianPreview.mockReset().mockResolvedValue(undefined);
+    mocks.getAppRuntimeStatus.mockReset().mockImplementation(async () => ({
+      pipelineRunning: false,
+      previewProjectId: useGaussianTransformStore.getState().descriptor?.projectId ?? null,
+    }));
+    mocks.exportPly.mockReset().mockResolvedValue("E:\\Exports\\final.ply");
+    mocks.revealFile.mockReset().mockResolvedValue(undefined);
+    mocks.revealProject.mockReset().mockResolvedValue(undefined);
+    mocks.revealProjectLogs.mockReset().mockResolvedValue(undefined);
     mocks.resumePipeline.mockReset().mockResolvedValue({
       projectId: project.id, projectPath: project.projectPath, finalPly: project.finalPly,
       fileSize: project.fileSize, splatCount: project.splatCount, inputImages: 100,
@@ -127,8 +144,8 @@ describe("App preview workspace", () => {
     mocks.probeAndPlan.mockReset();
     mocks.confirmLargeImageSequence.mockReset().mockResolvedValue(true);
     mocks.startPipeline.mockReset();
-    mocks.notifyPreviewDisposed.mockReset().mockImplementation((callback: (projectId: string) => void, projectId: string) => {
-      queueMicrotask(() => callback(projectId));
+    mocks.notifyPreviewDisposed.mockReset().mockImplementation((callback: (projectId: string, previewSessionId: number) => void, projectId: string, previewSessionId: number) => {
+      queueMicrotask(() => callback(projectId, previewSessionId));
     });
     mocks.prepareGaussianPreview.mockResolvedValue({
       projectId: project.id,
@@ -155,7 +172,7 @@ describe("App preview workspace", () => {
 
   it("shows the current package version and a start action without a trailing arrow", () => {
     expect(container.querySelector(".brand-name")?.textContent).toBe("OOOSplat");
-    expect(container.querySelector(".version-tag")?.textContent).toBe("LOCAL / 0.4.0");
+    expect(container.querySelector(".version-tag")?.textContent).toBe("LOCAL / 0.4.1");
     const startButton = container.querySelector(".primary-action");
     expect(startButton?.textContent?.trim()).toBe("开始生成");
     expect(startButton?.querySelectorAll("svg")).toHaveLength(1);
@@ -244,6 +261,59 @@ describe("App preview workspace", () => {
     expect(container.textContent).not.toContain("将自动提取透明画面和 COLMAP Mask");
   });
 
+  it("hides the previous live process after selecting new media but keeps new analysis notices", async () => {
+    act(() => useAppStore.setState({
+      phase: "failed",
+      progress: 64,
+      progressMessage: "old task output",
+      latestEvent: {
+        sequence: 1, timestamp: new Date().toISOString(), kind: "log", level: "error", stage: "failed",
+        engine: "system", progress: 64, stageProgress: null, indeterminate: false, message: "old task output",
+        current: null, total: null, unit: null, elapsedMs: 1_000, acceleration: null,
+      },
+      events: [{
+        sequence: 1, timestamp: new Date().toISOString(), kind: "log", level: "error", stage: "failed",
+        engine: "system", progress: 64, stageProgress: null, indeterminate: false, message: "old task output",
+        current: null, total: null, unit: null, elapsedMs: 1_000, acceleration: null,
+      }],
+    }));
+    mocks.selectVideo.mockResolvedValueOnce("E:\\Media\\alpha.mov");
+    mocks.probeAndPlan.mockResolvedValueOnce({
+      inputType: "video",
+      video: { duration: 10, width: 1920, height: 1080, fps: 30, totalFrames: 300, codec: "prores", rotation: 0, pixelFormat: "yuva444p10le", hasAlpha: true },
+      imageSequence: null,
+      plan: { retentionRatio: 0.5, samplingFps: 15, estimatedFrames: 150 },
+      estimate: { estimatedMs: 120_000, lowerBoundMs: 60_000, upperBoundMs: 180_000, confidence: "low", sampleCount: 0, basis: "video" },
+    });
+
+    expect(container.querySelector(".live-process")).not.toBeNull();
+    await act(async () => { container.querySelector<HTMLButtonElement>(".input-picker > .path-picker")?.click(); });
+    await flush();
+
+    expect(container.querySelector(".live-process")).toBeNull();
+    expect(container.querySelector(".alpha-source-status")).not.toBeNull();
+    expect(container.textContent).not.toContain("old task output");
+  });
+
+  it("shows a new-media analysis error without restoring the previous process log", async () => {
+    act(() => useAppStore.setState({
+      events: [{
+        sequence: 1, timestamp: new Date().toISOString(), kind: "log", level: "info", stage: "completed",
+        engine: "system", progress: 100, stageProgress: 100, indeterminate: false, message: "old completed log",
+        current: null, total: null, unit: null, elapsedMs: 1_000, acceleration: null,
+      }],
+    }));
+    mocks.selectVideo.mockResolvedValueOnce("E:\\Media\\broken.mov");
+    mocks.probeAndPlan.mockRejectedValueOnce(new Error("Unable to read the selected media"));
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(".input-picker > .path-picker")?.click(); });
+    await flush();
+
+    expect(container.querySelector(".live-process")).toBeNull();
+    expect(container.querySelector(".inline-error")?.textContent).toContain("Unable to read the selected media");
+    expect(container.textContent).not.toContain("old completed log");
+  });
+
   it("offers to continue an unfinished project from its checkpoint", async () => {
     const unfinished = { ...project, status: "cancelled" as const, finalPly: null, completedAt: null };
     await act(async () => { useAppStore.setState({ projects: [unfinished] }); });
@@ -254,6 +324,68 @@ describe("App preview workspace", () => {
 
     expect(mocks.resumePipeline).toHaveBeenCalledWith(project.id);
     expect(mocks.estimateProjectRuntime).toHaveBeenCalledWith(project.id);
+  });
+
+  it("shows actionable mapper guidance and opens the validated project log folder", async () => {
+    const unfinished = { ...project, status: "failed" as const, finalPly: null, completedAt: null };
+    mocks.resumePipeline.mockRejectedValueOnce({
+      code: "pipeline_failed",
+      message: "Could not find a good initial image pair",
+      failedStage: "reconstructing",
+      engine: "colmap",
+      failureKind: "mapper_source",
+      projectId: project.id,
+    });
+    await act(async () => { useAppStore.setState({ projects: [unfinished] }); });
+
+    const resumeButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "继续任务");
+    await act(async () => { resumeButton?.click(); });
+    await flush();
+
+    const dialog = container.querySelector<HTMLElement>(".failure-guidance-dialog");
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain("COLMAP");
+    expect(dialog?.textContent).toContain("Could not find a good initial image pair");
+
+    await act(async () => { dialog?.querySelector<HTMLButtonElement>("button.secondary")?.click(); });
+    await flush();
+    expect(mocks.revealProjectLogs).toHaveBeenCalledWith(project.id);
+
+    await act(async () => { dialog?.querySelector<HTMLButtonElement>("button.primary")?.click(); });
+    await flush();
+    expect(mocks.resumePipeline).toHaveBeenCalledTimes(2);
+  });
+
+  it("classifies Brush dataset read errors separately and translates the open dialog", async () => {
+    const unfinished = { ...project, status: "failed" as const, finalPly: null, completedAt: null };
+    mocks.resumePipeline.mockRejectedValueOnce({
+      code: "pipeline_failed",
+      message: "IO error while loading dataset: early eof",
+      failedStage: "trainingSplats",
+      engine: "brush",
+      failureKind: "brush_dataset",
+      projectId: project.id,
+    });
+    await act(async () => { useAppStore.setState({ projects: [unfinished] }); });
+    const resumeButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "继续任务");
+    await act(async () => { resumeButton?.click(); });
+    await flush();
+
+    const heading = container.querySelector<HTMLElement>(".failure-guidance-dialog h2")!;
+    const chineseHeading = heading.textContent;
+    expect(container.querySelector(".failure-guidance-dialog")?.textContent).toContain("early eof");
+    await act(async () => { container.querySelector<HTMLButtonElement>(".language-action")?.click(); });
+    expect(heading.textContent).not.toBe(chineseHeading);
+  });
+
+  it("does not show failure guidance for a cancelled run", async () => {
+    const unfinished = { ...project, status: "cancelled" as const, finalPly: null, completedAt: null };
+    mocks.resumePipeline.mockRejectedValueOnce({ code: "cancelled", message: "cancelled", projectId: project.id });
+    await act(async () => { useAppStore.setState({ projects: [unfinished] }); });
+    const resumeButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "继续任务");
+    await act(async () => { resumeButton?.click(); });
+    await flush();
+    expect(container.querySelector(".failure-guidance-dialog")).toBeNull();
   });
 
   it("blocks the interface while a slow cancellation is still terminating processes", async () => {
@@ -329,7 +461,8 @@ describe("App preview workspace", () => {
     }));
     await flush();
 
-    expect(container.textContent).toContain("估算 50%");
+    expect(container.querySelector(".current-message")?.textContent).toBe("Brush 训练中 · 估算进度 50%");
+    expect(Array.from(container.querySelectorAll(".process-metrics b"), (node) => node.textContent)).not.toContain("估算 50%");
     expect(container.textContent).not.toContain("15,000 / 15,000");
   });
 
@@ -397,8 +530,8 @@ describe("App preview workspace", () => {
 
   it("does not revoke the PLY permission before the renderer is disposed", async () => {
     let finishDisposal: (() => void) | undefined;
-    mocks.notifyPreviewDisposed.mockImplementationOnce((callback: (projectId: string) => void, projectId: string) => {
-      finishDisposal = () => callback(projectId);
+    mocks.notifyPreviewDisposed.mockImplementationOnce((callback: (projectId: string, previewSessionId: number) => void, projectId: string, previewSessionId: number) => {
+      finishDisposal = () => callback(projectId, previewSessionId);
     });
     const previewButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "预览");
     await act(async () => { previewButton?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
@@ -413,6 +546,33 @@ describe("App preview workspace", () => {
     await act(async () => { finishDisposal?.(); });
     await flush();
     expect(mocks.releaseGaussianPreview).toHaveBeenCalledWith(project.id);
+  });
+
+  it("unlocks the project after the preview disposal watchdog and ignores a late callback", async () => {
+    let finishDisposal: (() => void) | undefined;
+    mocks.notifyPreviewDisposed.mockImplementationOnce((callback: (projectId: string, previewSessionId: number) => void, projectId: string, previewSessionId: number) => {
+      finishDisposal = () => callback(projectId, previewSessionId);
+    });
+    const previewButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "预览");
+    await act(async () => { previewButton?.click(); });
+    await flush();
+
+    vi.useFakeTimers();
+    try {
+      const backButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "返回任务");
+      await act(async () => { backButton?.click(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(8_001); });
+
+      const reopenedButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "预览");
+      expect(reopenedButton?.disabled).toBe(false);
+      expect(useGaussianTransformStore.getState().descriptor).toBeNull();
+      expect(mocks.releaseGaussianPreview).toHaveBeenCalledTimes(1);
+
+      await act(async () => { finishDisposal?.(); });
+      expect(mocks.releaseGaussianPreview).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps the task workspace visible when preview resource release fails", async () => {
@@ -532,5 +692,28 @@ describe("App preview workspace", () => {
 
     expect(mocks.confirmLargeImageSequence).toHaveBeenCalledWith(501);
     expect(mocks.startPipeline).not.toHaveBeenCalled();
+  });
+
+  it("renders the completed result card and wires its file actions", async () => {
+    const result = await mocks.resumePipeline();
+    await act(async () => {
+      useAppStore.setState({ phase: "completed", result, projects: [project] });
+    });
+    await flush();
+
+    expect(container.querySelector(".completion-result")).not.toBeNull();
+    const actions = container.querySelectorAll<HTMLButtonElement>(".completion-result-actions button");
+    await act(async () => actions[1].click());
+    await act(async () => actions[2].click());
+    expect(mocks.exportPly).toHaveBeenCalledWith(result);
+    expect(mocks.revealProject).toHaveBeenCalledWith(project);
+  });
+
+  it("restores the low-registration warning from historical project data", async () => {
+    await act(async () => {
+      useAppStore.getState().setProjects([{ ...project, registeredRatio: 0.62 }]);
+    });
+    await flush();
+    expect(container.querySelector(".project-quality-warning")?.textContent).toContain("62.0%");
   });
 });

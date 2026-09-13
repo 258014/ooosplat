@@ -10,11 +10,12 @@ pub async fn probe_video(
     executable: &Path,
     input: &Path,
     log_path: Option<std::path::PathBuf>,
+    process_manager: &ProcessManager,
 ) -> Result<VideoInfo> {
     if !input.is_file() {
         return Err(SplatError::InvalidPath(input.to_path_buf()));
     }
-    let output = ProcessManager::new().run(ProcessSpec {
+    let output = process_manager.run(ProcessSpec {
         executable: executable.to_path_buf(),
         args: vec![
             OsString::from("-v"), OsString::from("error"),

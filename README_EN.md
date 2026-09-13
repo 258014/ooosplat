@@ -7,18 +7,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.0"><strong>⬇️ Download OOOSplat 0.4.0 for Windows, macOS, or Ubuntu</strong></a>
+  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.1"><strong>⬇️ Download OOOSplat 0.4.1 for Windows, macOS, or Ubuntu</strong></a>
 </p>
 
 OOOSplat is a local desktop application that turns an ordinary orbit video or image sequence into a 3D Gaussian Splatting project in one workflow. Choose source media, a project directory, and a quality preset, and OOOSplat automatically handles image preparation, camera reconstruction, training, PLY publishing, preview, adjustment, and export.
 
 Windows and the Apple Silicon macOS Alpha provide FFmpeg, FFprobe, COLMAP, and Brush with the application. Linux support remains limited to an Ubuntu 24.04 LTS x86_64 Alpha. Every generation stage runs on the user's own CPU and GPU; input media, project data, models, and logs do not need to be uploaded to a cloud reconstruction or training service. The React interface calls the local Rust backend directly, with no remote service or localhost API required.
 
-Current version: **0.4.0**
+Current version: **0.4.1**
 
 See the [OOOSplat Roadmap](ROADMAP_EN.md) for planned work.
 
-> Version 0.4.0 adds image-sequence input, automatic masks for transparent MOV/PNG media, stage-level pipeline resume, and rectangle, sphere, and box Gaussian editing while preserving the original `final.ply`.
+> Version 0.4.1 supports image-sequence input, automatic masks for transparent MOV/PNG media, stage-level pipeline resume, and rectangle, sphere, and box Gaussian editing while preserving the original `final.ply`.
 
 ## Why OOOSplat
 
@@ -127,17 +127,17 @@ sudo apt install -y \
 
 Install a working Vulkan driver for the graphics adapter, such as the proprietary NVIDIA driver or Mesa for AMD/Intel. Ubuntu 24.04's non-CUDA COLMAP package automatically uses the CPU, while Brush selects an available graphics backend at runtime. Fully CPU-only software Vulkan has not yet been validated end to end.
 
-After downloading the `OOOSplat-0.4.0-x64-linux` Artifact from GitHub Actions, install it with:
+After downloading the `OOOSplat-0.4.1-x64-linux` Artifact from GitHub Actions, install it with:
 
 ```bash
-sudo apt install ./OOOSplat-0.4.0-x64-linux.deb
+sudo apt install ./OOOSplat-0.4.1-x64-linux.deb
 ```
 
 The `.deb` installs FFmpeg, FFprobe, and CPU COLMAP through Ubuntu's package manager; the pinned Brush runtime is included in the package.
 
 ## Installation and Use
 
-1. On Windows, run `OOOSplat-0.4.0-x64-windows.exe`. On an Apple Silicon Mac, open `OOOSplat-0.4.0-arm64-macos.dmg` and drag OOOSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./OOOSplat-0.4.0-x64-linux.deb`.
+1. On Windows, run `OOOSplat-0.4.1-x64-windows.exe`. On an Apple Silicon Mac, open `OOOSplat-0.4.1-arm64-macos.dmg` and drag OOOSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./OOOSplat-0.4.1-x64-linux.deb`.
 2. Start OOOSplat and confirm that the bundled engine status in the top bar is healthy. Use the `EN / 中文` action in the upper-right corner to switch the interface language instantly.
 3. Under “01 Create New Task,” choose Video or Images from the input-type menu, then click the input field to select a video file or image-sequence folder.
 4. Choose the projects root; OOOSplat remembers the last location.
@@ -206,7 +206,7 @@ What is sent:
 | Field | Description |
 | --- | --- |
 | Install ID | A random UUID generated on first launch. No hardware serial, MAC address, or device fingerprint is read |
-| App version, OS, CPU architecture | For example `0.4.0` / `windows` / `x86_64` |
+| App version, OS, CPU architecture | For example `0.4.1` / `windows` / `x86_64` |
 | Event name | `daily_active`, `generation_started`, `generation_completed`, `generation_failed`, `pipeline_stage_completed`. `daily_active` is sent at most once a day, and once more on the day the app version changes |
 | Quality preset and input type | Enumerated values such as `balanced` / `video`; an image-sequence input reports `images` |
 | Stage and total durations | Milliseconds |
@@ -311,7 +311,7 @@ npm run package:windows
 The NSIS installer is written to:
 
 ```text
-dist-artifacts\OOOSplat-0.4.0-x64-windows.exe
+dist-artifacts\OOOSplat-0.4.1-x64-windows.exe
 ```
 
 Run `npm run setup:engines` before the first build. Tauri's `beforeBuildCommand` automatically runs the engine checks and frontend production build, but it does not access the network implicitly during packaging.

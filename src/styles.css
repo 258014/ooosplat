@@ -156,7 +156,7 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); animation: pulse 1.6s ease-in-out infinite; }
 .mono { font: 650 13px/1 "Cascadia Mono", monospace; }
 .current-message { min-height: 20px; margin: 14px 0 0; color: #455064; font-size: 12px; line-height: 1.55; }
-.process-metrics { margin-top: 13px; display: grid; grid-template-columns: .8fr 1.2fr .8fr; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.process-metrics { margin-top: 13px; display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .process-metrics span { min-width: 0; padding: 11px 10px; display: grid; gap: 5px; border-right: 1px solid var(--line); }
 .process-metrics span:first-child { padding-left: 0; }
 .process-metrics span:last-child { border: 0; }
@@ -170,6 +170,9 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .stage-timeline li.done::before { background: #82c6a7; }
 .stage-timeline li.active { color: var(--ink); }
 .stage-timeline li.active > span { background: var(--blue); border-color: var(--blue); box-shadow: 0 0 0 4px rgba(30,92,255,.1); }
+.stage-timeline li.failed, .stage-timeline li.cancelled { color: var(--ink); }
+.stage-timeline li.failed > span { background: var(--red); border-color: var(--red); box-shadow: 0 0 0 4px rgba(176,74,64,.1); }
+.stage-timeline li.cancelled > span { background: var(--amber); border-color: var(--amber); box-shadow: 0 0 0 4px rgba(199,131,20,.1); }
 .stage-timeline li small { color: var(--blue); font: 600 10px/1 "Cascadia Mono", monospace; }
 .log-toolbar { padding: 9px 0; display: flex; justify-content: space-between; color: var(--muted); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 650; }
 .log-toolbar small { color: var(--faint); font-weight: 400; }
@@ -244,6 +247,26 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .inline-error { margin-top: 16px; padding: 10px 0; display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: start; color: var(--red); border-top: 1px solid #e4c1bd; border-bottom: 1px solid #e4c1bd; font-size: 12px; line-height: 1.5; }
 .inline-error button { color: inherit; background: transparent; border: 0; cursor: pointer; font-size: 11px; }
 
+.failure-guidance-backdrop { position: fixed; inset: 0; z-index: 130; display: grid; place-items: center; padding: 24px; background: rgba(16, 23, 36, .58); backdrop-filter: blur(3px); }
+.failure-guidance-dialog { width: min(540px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow-y: auto; color: var(--ink); background: #f8f9fb; border: 1px solid #b9c3d1; box-shadow: 0 28px 76px rgba(5, 12, 24, .34); }
+.failure-guidance-heading { min-height: 78px; padding: 16px 18px; display: grid; grid-template-columns: 42px minmax(0, 1fr) 30px; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+.failure-guidance-heading > span { width: 42px; height: 42px; display: grid; place-items: center; color: var(--red); background: #ffebe8; border: 1px solid #e8c2bd; }
+.failure-guidance-heading small { display: block; margin-bottom: 5px; color: #7d8798; font: 650 9px/1 "Cascadia Mono", monospace; letter-spacing: .1em; text-transform: uppercase; }
+.failure-guidance-heading h2 { margin: 0; font: 700 18px/1.25 var(--font-sans); }
+.failure-guidance-heading button { width: 30px; height: 30px; padding: 0; display: grid; place-items: center; color: #687489; background: transparent; border: 1px solid transparent; cursor: pointer; }
+.failure-guidance-heading button:hover:not(:disabled) { color: var(--blue); background: #edf2ff; border-color: #cad6f4; }
+.failure-guidance-dialog > p { margin: 18px 20px 0; color: #536078; font-size: 12px; line-height: 1.75; }
+.failure-guidance-dialog > strong { display: block; margin: 17px 20px 0; color: #2e3a50; font-size: 12px; }
+.failure-guidance-dialog > ul { margin: 9px 20px 0; padding-left: 19px; color: #657085; font-size: 11px; line-height: 1.8; }
+.failure-guidance-dialog details { margin: 16px 20px 0; border-top: 1px solid var(--line); }
+.failure-guidance-dialog summary { padding: 11px 0 7px; color: #69758a; cursor: pointer; font-size: 10px; }
+.failure-guidance-dialog pre { max-height: 130px; margin: 0; padding: 9px 10px; overflow: auto; color: #dce3ee; background: #202735; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.55 "Cascadia Mono", monospace; }
+.failure-guidance-actions { padding: 18px 20px 20px; display: flex; justify-content: flex-end; gap: 8px; }
+.failure-guidance-actions button { min-height: 36px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid; cursor: pointer; font-size: 11px; font-weight: 700; }
+.failure-guidance-actions .secondary { color: #556278; background: transparent; border-color: #bac4d1; }
+.failure-guidance-actions .primary { color: #fff; background: var(--blue); border-color: var(--blue-dark); }
+.failure-guidance-actions button:disabled { cursor: default; opacity: .5; }
+
 .refresh-action { padding: 7px 0; display: flex; align-items: center; gap: 6px; color: var(--muted); background: transparent; border: 0; cursor: pointer; font-size: 11px; }
 .archive-summary { margin-bottom: 24px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line-dark); border-bottom: 1px solid var(--line-dark); }
 .archive-summary span { padding: 15px 14px; display: grid; gap: 5px; border-right: 1px solid var(--line); }
@@ -270,6 +293,22 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .status-copy { flex: 0 0 auto; margin-left: auto; color: var(--faint); font-size: 10px; }
 .project-path { margin: 8px 0 0 14px; overflow: hidden; color: var(--muted); font: 11px/1.45 "Cascadia Mono", "Microsoft YaHei UI", monospace; text-overflow: ellipsis; white-space: nowrap; }
 .project-failure { margin: 8px 0 0 14px; color: var(--red); font-size: 11px; line-height: 1.5; }
+.project-quality-warning { margin: 8px 0 0 14px; display: flex; align-items: center; gap: 6px; color: var(--amber); font-size: 10px; line-height: 1.45; }
+.completion-result { margin-top: 18px; border: 1px solid var(--line-dark); background: #f2f5f9; }
+.completion-result-heading { min-height: 40px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+.completion-result-heading > div { display: flex; align-items: center; gap: 8px; }
+.completion-result-heading > span { color: var(--green); font-size: 10px; }
+.result-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+.completion-result-stats { margin: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.completion-result-stats > div { min-width: 0; padding: 11px 10px; border-right: 1px solid var(--line); }
+.completion-result-stats > div:last-child { border-right: 0; }
+.completion-result-stats dt { color: var(--faint); font-size: 9px; }
+.completion-result-stats dd { margin: 5px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 10px/1.2 "Cascadia Mono", "Microsoft YaHei UI", monospace; }
+.completion-warning { margin: 0; padding: 9px 12px; display: flex; align-items: center; gap: 7px; color: #7c520e; background: #fff7e7; border-top: 1px solid #ead8b0; font-size: 10px; }
+.completion-result-actions { padding: 9px 12px; display: flex; gap: 16px; border-top: 1px solid var(--line); }
+.completion-result-actions button { padding: 3px 0; display: flex; align-items: center; gap: 5px; color: #526078; background: transparent; border: 0; cursor: pointer; font-size: 10px; }
+.completion-result-actions button:hover:not(:disabled) { color: var(--blue); }
+.completion-result-actions button:disabled { opacity: .45; cursor: default; }
 .project-stats { margin: 15px 0 0; display: grid; grid-template-columns: .85fr 1.6fr 1fr .7fr; }
 .project-stats > div { min-width: 0; padding: 0 10px; display: grid; gap: 5px; border-right: 1px solid var(--line); }
 .project-stats > div:first-child { padding-left: 14px; }
@@ -409,6 +448,7 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .transform-scrubber.dragging { cursor: col-resize; }
 .transform-scrubber.long-label { width: 58px; padding: 0 5px; overflow: hidden; font-family: var(--font-sans); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .transform-field input { width: 100%; height: 28px; padding: 0 7px; color: #273247; background: rgba(255, 255, 255, .55); border: 1px solid #c8d0dc; font: 10px/1 "Cascadia Mono", monospace; }
+.transform-field input.invalid { color: #8b2e28; background: #fff1ef; border-color: #d58f87; }
 .transform-field input:focus { outline: 0; border-color: var(--blue); background: #f7f9ff; }
 .preview-statusbar { flex: 0 0 auto; min-height: 32px; padding: 5px 10px; display: flex; align-items: center; gap: 13px; overflow-x: auto; color: #aeb9ca; background: #202735; font: 9px/1.25 "Cascadia Mono", "Microsoft YaHei UI", monospace; white-space: nowrap; }
 .preview-statusbar span { display: inline-flex; align-items: center; gap: 5px; }

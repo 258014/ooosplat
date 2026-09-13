@@ -28,6 +28,8 @@ pub fn run_app() {
             commands::start_reshoot_pipeline,
             commands::resume_pipeline,
             commands::cancel_pipeline,
+            commands::get_app_runtime_status,
+            commands::open_project_location,
             commands::export_ply,
             commands::get_project_overview,
             commands::set_projects_root,

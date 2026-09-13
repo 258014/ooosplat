@@ -1,15 +1,15 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
-  ArrowDownToLine, Blend, ChevronDown, ChevronRight, CircleAlert, CircleCheck, Clapperboard, Cpu, FileBox, Film, Images,
-  Eye, FolderOpen, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Square, Trash2,
-  Languages, Settings2, Zap,
+  ArrowDownToLine, Blend, ChevronDown, ChevronRight, CircleAlert, CircleCheck, Clapperboard, Cpu, Download, Eye,
+  FileBox, Film, FolderOpen, Images, Languages, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Settings2,
+  Square, Trash2, X, Zap,
 } from "lucide-react";
 import appLogo from "../../assets/app-icon.svg";
 import packageMetadata from "../../package.json";
 import { TelemetryPreferences } from "../components/TelemetryPreferences";
 import {
   cancelPipeline, checkEngines, confirmAndDeleteProject, confirmLargeImageSequence,
-  estimateProjectRuntime, getProjectOverview, onPipelineEvent, probeAndPlan, revealProject,
+  estimateProjectRuntime, exportPly, getAppRuntimeStatus, getProjectOverview, onPipelineEvent, probeAndPlan, revealProject, revealProjectLogs,
   selectImageSequence, selectProjectsRoot, selectVideo,
   setProjectsRoot, startPipeline, prepareGaussianPreview, releaseGaussianPreview,
   initializeTelemetry, setTelemetryConsent, resumePipeline, startReshootPipeline,
@@ -17,6 +17,7 @@ import {
 import { startElapsedTicker } from "../lib/elapsedTimer";
 import { checkForAppUpdate, downloadAndInstallAppUpdate, type UpdateDownloadProgress } from "../lib/updater";
 import type { Update } from "@tauri-apps/plugin-updater";
+import { pipelineCommandError, pipelineErrorMessage, pipelineWasCancelled, type PipelineFailureKind } from "../lib/pipelineError";
 import { localizePipelineMessage, useI18n, type TranslationKey } from "../i18n";
 import { useAppStore } from "../stores/appStore";
 import { useGaussianTransformStore } from "../stores/gaussianTransformStore";
@@ -25,6 +26,92 @@ import type { TelemetryPreferences as TelemetryPreferencesState } from "../types
 
 const GaussianViewer = lazy(() => import("../components/GaussianViewer").then((module) => ({ default: module.GaussianViewer })));
 const CANCELLATION_OVERLAY_DELAY_MS = 300;
+const PREVIEW_CLOSE_TIMEOUT_MS = 8_000;
+const NATIVE_ACTION_TIMEOUT_MS = 8_000;
+const MAPPER_REFINEMENT_PATTERN = /retriangulation|global bundle adjustment/i;
+
+type FailureDialogState = {
+  kind: PipelineFailureKind;
+  projectId: string | null;
+  rawMessage: string;
+};
+
+const withTimeout = <T,>(operation: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> => new Promise<T>((resolve, reject) => {
+  const timer = window.setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  operation.then(
+    (value) => { window.clearTimeout(timer); resolve(value); },
+    (error) => { window.clearTimeout(timer); reject(error); },
+  );
+});
+
+const inferFailureDialog = (error: unknown, fallbackStage?: string, fallbackProjectId?: string): FailureDialogState | null => {
+  const structured = pipelineCommandError(error);
+  if (structured?.code === "cancelled") return null;
+  const stage = structured?.failedStage ?? fallbackStage;
+  const rawMessage = structured?.message ?? pipelineErrorMessage(error) ?? "";
+  let kind = structured?.failureKind;
+  if (!kind && stage === "reconstructing") kind = "mapper_source";
+  if (!kind && stage === "trainingSplats") {
+    kind = /early eof|failed to load dataset|i\/o error|io error|no such file|access denied|permission denied/i.test(rawMessage)
+      ? "brush_dataset"
+      : "brush_gpu";
+  }
+  if (!kind) return null;
+  return { kind, projectId: structured?.projectId ?? fallbackProjectId ?? null, rawMessage };
+};
+
+function FailureGuidanceDialog({ failure, action, onClose, onRetry, onOpenLogs }: {
+  failure: FailureDialogState;
+  action: "retry" | "logs" | null;
+  onClose: () => void;
+  onRetry: () => void;
+  onOpenLogs: () => void;
+}) {
+  const { t } = useI18n();
+  const mapper = failure.kind === "mapper_source" || failure.kind === "mapper_storage";
+  const dataset = failure.kind === "brush_dataset";
+  const title = mapper ? t("failure.mapperTitle") : dataset ? t("failure.brushDatasetTitle") : t("failure.brushTitle");
+  const description = failure.kind === "mapper_source"
+    ? t("failure.mapperSource")
+    : failure.kind === "mapper_storage"
+      ? t("failure.mapperStorage")
+      : dataset
+        ? t("failure.brushDataset")
+        : t("failure.brushGpu");
+  const tips: TranslationKey[] = failure.kind === "mapper_source"
+    ? ["failure.mapperTip1", "failure.mapperTip2", "failure.mapperTip3"]
+    : failure.kind === "mapper_storage"
+      ? ["failure.storageTip1", "failure.storageTip2"]
+      : dataset
+        ? ["failure.datasetTip1", "failure.datasetTip2"]
+        : ["failure.brushTip1", "failure.brushTip2", "failure.brushTip3"];
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && action === null) onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [action, onClose]);
+
+  return <div className="failure-guidance-backdrop" role="dialog" aria-modal="true" aria-labelledby="failure-guidance-title">
+    <section className="failure-guidance-dialog">
+      <div className="failure-guidance-heading">
+        <span><CircleAlert size={22} /></span>
+        <div><small>{mapper ? "COLMAP" : "Brush"}</small><h2 id="failure-guidance-title">{title}</h2></div>
+        <button type="button" aria-label={t("common.close")} disabled={action !== null} onClick={onClose}><X size={17} /></button>
+      </div>
+      <p>{description}</p>
+      <strong>{t("failure.solutions")}</strong>
+      <ul>{tips.map((key) => <li key={key}>{t(key)}</li>)}</ul>
+      {failure.rawMessage && <details><summary>{t("failure.details")}</summary><pre>{failure.rawMessage}</pre></details>}
+      <div className="failure-guidance-actions">
+        <button type="button" className="secondary" disabled={action !== null || !failure.projectId} onClick={onOpenLogs}>{action === "logs" ? <LoaderCircle className="spin" size={14} /> : <FolderOpen size={14} />}{t("failure.openLogs")}</button>
+        <button type="button" className="primary" disabled={action !== null || !failure.projectId} onClick={onRetry}>{action === "retry" ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}{t("failure.retry")}</button>
+      </div>
+    </section>
+  </div>;
+}
 
 const qualities: Array<{ value: Quality; label: TranslationKey; description: TranslationKey }> = [
   { value: "fast", label: "quality.fast", description: "quality.fastHint" },
@@ -39,7 +126,7 @@ const stages = [
   ["exporting", "stage.export"],
 ] as const;
 
-const rawMessageOf = (error: unknown) => typeof error === "string" ? error : error instanceof Error ? error.message : null;
+const rawMessageOf = pipelineErrorMessage;
 const basename = (path: string) => path.split(/[\\/]/).at(-1) ?? path;
 const formatBytes = (bytes: number | null, locale: string) => {
   if (bytes == null) return "—";
@@ -56,7 +143,7 @@ const statusKey: Record<ProjectStatus, TranslationKey> = { running: "status.runn
 const stagePosition = (stage?: string) => {
   if (!stage || ["created", "probingVideo", "planningFrames"].includes(stage)) return 0;
   if (stage === "validatingReconstruction") return 4;
-  if (["completed", "failed", "cancelled"].includes(stage)) return 6;
+  if (stage === "completed") return 6;
   const index = stages.findIndex(([key]) => key === stage);
   return index < 0 ? 0 : index;
 };
@@ -74,7 +161,19 @@ function engineReady(engine: EngineStatus) {
   return engine.canStart;
 }
 
-function ProjectRow({ project, busy, previewing, previewDisabled, onPreview, onReshoot, onResume, onDelete }: { project: ProjectSummary; busy: boolean; previewing: boolean; previewDisabled: boolean; onPreview: (project: ProjectSummary) => void; onReshoot: (project: ProjectSummary) => void; onResume: (project: ProjectSummary) => void; onDelete: (project: ProjectSummary) => void }) {
+function ProjectRow({ project, busy, previewing, previewDisabled, deleting, revealing, onPreview, onReshoot, onResume, onReveal, onDelete }: {
+  project: ProjectSummary;
+  busy: boolean;
+  previewing: boolean;
+  previewDisabled: boolean;
+  deleting: boolean;
+  revealing: boolean;
+  onPreview: (project: ProjectSummary) => void;
+  onReshoot: (project: ProjectSummary) => void;
+  onResume: (project: ProjectSummary) => void;
+  onReveal: (project: ProjectSummary) => void;
+  onDelete: (project: ProjectSummary) => void;
+}) {
   const { locale, t, formatDate, formatDuration } = useI18n();
   return <article className="project-row">
     <div className="project-row-main">
@@ -85,6 +184,7 @@ function ProjectRow({ project, busy, previewing, previewDisabled, onPreview, onR
       </div>
       <p className="project-path" title={project.projectPath}>{project.projectPath}</p>
       {project.failureMessage && <p className="project-failure">{localizePipelineMessage(locale, project.failureMessage)}</p>}
+      {project.registeredRatio != null && project.registeredRatio < 0.8 && <p className="project-quality-warning" role="status"><CircleAlert size={13} />{t("result.lowRegistration", { value: (project.registeredRatio * 100).toFixed(1) })}</p>}
     </div>
     <dl className="project-stats">
       <div><dt>PLY</dt><dd>{formatBytes(project.fileSize, locale)}</dd></div>
@@ -96,8 +196,8 @@ function ProjectRow({ project, busy, previewing, previewDisabled, onPreview, onR
       {project.status === "completed" && <button className="preview-link" type="button" disabled={previewDisabled} onClick={() => onPreview(project)}>{previewing ? <LoaderCircle className="spin" size={14} /> : <Eye size={14} />}{previewing ? t("project.opening") : t("project.preview")}</button>}
       {project.status === "completed" && <button className="reshoot-link" type="button" disabled={busy || previewDisabled} onClick={() => onReshoot(project)}><Film size={14} />{t("project.reshoot")}</button>}
       {project.status !== "completed" && <button className="resume-link" type="button" disabled={busy} onClick={() => onResume(project)}><Play size={14} fill="currentColor" />{t("project.resume")}</button>}
-      <button type="button" onClick={() => void revealProject(project)}><MapPin size={14} />{t("project.reveal")}</button>
-      <button className="danger-link" type="button" disabled={busy} onClick={() => onDelete(project)}><Trash2 size={14} />{t("project.delete")}</button>
+      <button type="button" disabled={revealing} onClick={() => onReveal(project)}>{revealing ? <LoaderCircle className="spin" size={14} /> : <MapPin size={14} />}{t("project.reveal")}</button>
+      <button className="danger-link" type="button" disabled={busy || deleting} onClick={() => onDelete(project)}>{deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{t("project.delete")}</button>
     </div>
   </article>;
 }
@@ -108,13 +208,18 @@ export function App() {
   const loadGaussian = useGaussianTransformStore((state) => state.load);
   const closeGaussian = useGaussianTransformStore((state) => state.close);
   const isRunning = store.phase === "running";
-  const logEnd = useRef<HTMLDivElement>(null);
+  const liveLogRef = useRef<HTMLDivElement>(null);
+  const followLiveLogRef = useRef(true);
   const workspaceRef = useRef<HTMLElement>(null);
   const controlPaneRef = useRef<HTMLElement>(null);
   const projectsPaneRef = useRef<HTMLElement>(null);
   const taskScrollPositions = useRef({ control: 0, projects: 0 });
   const previewReleasePromises = useRef(new Map<string, Promise<void>>());
   const releasedPreviewProjects = useRef(new Set<string>());
+  const previewSessionSequence = useRef(0);
+  const activePreviewSession = useRef<{ projectId: string; sessionId: number } | null>(null);
+  const previewCloseWatchdog = useRef<number | null>(null);
+  const pipelineCommandPending = useRef(false);
   const runStartedAt = useRef<number | null>(null);
   const runElapsedOffset = useRef(0);
   const cancellationOverlayTimer = useRef<number | null>(null);
@@ -127,7 +232,11 @@ export function App() {
   const [viewMode, setViewMode] = useState<"tasks" | "preview">("tasks");
   const [openingPreviewProjectId, setOpeningPreviewProjectId] = useState<string | null>(null);
   const [closingPreviewProjectId, setClosingPreviewProjectId] = useState<string | null>(null);
-  const [disposedPreviewProjectId, setDisposedPreviewProjectId] = useState<string | null>(null);
+  const [previewSessionId, setPreviewSessionId] = useState(0);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [revealingProjectId, setRevealingProjectId] = useState<string | null>(null);
+  const [failureDialog, setFailureDialog] = useState<FailureDialogState | null>(null);
+  const [failureDialogAction, setFailureDialogAction] = useState<"retry" | "logs" | null>(null);
   const [showZoomControls, setShowZoomControls] = useState(false);
   const [telemetryPreferences, setTelemetryPreferences] = useState<TelemetryPreferencesState | null>(null);
   const [privacySettingsOpen, setPrivacySettingsOpen] = useState(false);
@@ -143,12 +252,26 @@ export function App() {
   const missingEngines = store.engines.filter((engine) => !engineReady(engine));
   const completed = useMemo(() => store.projects.filter((project) => project.status === "completed"), [store.projects]);
   const unfinished = useMemo(() => store.projects.filter((project) => project.status !== "completed"), [store.projects]);
-  const activeStageIndex = stagePosition(store.latestEvent?.stage);
-  const liveProgressLabel = store.latestEvent?.unit === "estimated_progress" && store.latestEvent.stageProgress != null
-    ? t("progress.estimated", { value: store.latestEvent.stageProgress.toFixed(0) })
-    : store.latestEvent?.current != null
-      ? `${formatNumber(store.latestEvent.current)}${store.latestEvent.total ? ` / ${formatNumber(store.latestEvent.total)}` : ""}`
-      : t("progress.continuing");
+  const progressEvent = useMemo(() => {
+    if (!store.latestEvent || !["failed", "cancelled"].includes(store.latestEvent.stage)) return store.latestEvent;
+    return [...store.events].reverse().find((event) => !["failed", "cancelled"].includes(event.stage)) ?? null;
+  }, [store.events, store.latestEvent]);
+  const activeStageIndex = stagePosition(progressEvent?.stage);
+  const latestMessage = store.latestEvent
+    ? localizePipelineMessage(locale, store.latestEvent.message)
+    : store.progressMessage
+      ? localizePipelineMessage(locale, store.progressMessage)
+      : t("progress.preparing");
+  const mapperPhaseKeepsRegistrationCount = store.latestEvent?.stage === "reconstructing"
+    && store.latestEvent.current != null
+    && store.latestEvent.total != null
+    && MAPPER_REFINEMENT_PATTERN.test(store.latestEvent.message);
+  const currentMessage = mapperPhaseKeepsRegistrationCount
+    ? `${latestMessage} · ${t("progress.registered", {
+      current: formatNumber(store.latestEvent!.current!),
+      total: formatNumber(store.latestEvent!.total!),
+    })}`
+    : latestMessage;
   const messageOf = useCallback((error: unknown) => rawMessageOf(error) ?? t("error.generic"), [t]);
   const currentStageLabel = useCallback((stage: string | undefined, index: number) => {
     if (stage === "completed") return t("stage.completed");
@@ -170,7 +293,28 @@ export function App() {
     const overview = await getProjectOverview();
     store.setProjectsRoot(overview.projectsRoot);
     store.setProjects(overview.projects);
+    return overview;
   };
+
+  const reconcileRuntimeState = useCallback(async () => {
+    const runtime = await getAppRuntimeStatus();
+    const appState = useAppStore.getState();
+    if (!runtime.pipelineRunning && !pipelineCommandPending.current && appState.phase === "running") {
+      appState.setPhase("idle");
+      clearCancellationFeedback();
+    }
+    const active = activePreviewSession.current;
+    if (viewMode === "tasks" && active && runtime.previewProjectId !== active.projectId) {
+      if (previewCloseWatchdog.current != null) {
+        window.clearTimeout(previewCloseWatchdog.current);
+        previewCloseWatchdog.current = null;
+      }
+      activePreviewSession.current = null;
+      if (useGaussianTransformStore.getState().descriptor?.projectId === active.projectId) closeGaussian();
+      setClosingPreviewProjectId((current) => current === active.projectId ? null : current);
+    }
+    return runtime;
+  }, [clearCancellationFeedback, closeGaussian, viewMode]);
 
   useEffect(() => {
     void Promise.all([checkEngines(), getProjectOverview()])
@@ -182,6 +326,13 @@ export function App() {
       })
       .catch((error) => store.setError(messageOf(error)));
   }, [store.setEngines, store.setProjects, store.setProjectsRoot, store.setColmapAcceleration, store.setError]);
+
+  useEffect(() => {
+    if (viewMode === "tasks") void reconcileRuntimeState().catch(() => undefined);
+    const onFocus = () => { void reconcileRuntimeState().catch(() => undefined); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [reconcileRuntimeState, viewMode]);
 
   useEffect(() => {
     void initializeTelemetry()
@@ -228,11 +379,23 @@ export function App() {
     return () => unlisten?.();
   }, [store.receiveEvent]);
 
-  // The log keeps only the most recent 500 events, so its length stops changing once a run
-  // passes that many while new lines keep arriving. Depend on the array itself, which
-  // receiveEvent replaces on every event, or auto-scroll stops on exactly the long runs
-  // that need it.
-  useEffect(() => { logEnd.current?.scrollIntoView({ block: "nearest" }); }, [store.events]);
+  // The log keeps only the most recent 500 events, so depend on the replaced array rather
+  // than its length. Updating scrollTop directly confines auto-follow to the log viewport
+  // and never moves the surrounding task pane.
+  useEffect(() => {
+    if (store.events.length === 0) {
+      followLiveLogRef.current = true;
+      return;
+    }
+    const log = liveLogRef.current;
+    if (log && followLiveLogRef.current) log.scrollTop = log.scrollHeight;
+  }, [store.events]);
+
+  const updateLiveLogFollow = useCallback(() => {
+    const log = liveLogRef.current;
+    if (!log) return;
+    followLiveLogRef.current = log.scrollHeight - log.scrollTop - log.clientHeight <= 24;
+  }, []);
 
   useEffect(() => {
     if (!isRunning || runStartedAt.current == null) return;
@@ -247,6 +410,7 @@ export function App() {
 
   useEffect(() => () => {
     if (cancellationOverlayTimer.current != null) window.clearTimeout(cancellationOverlayTimer.current);
+    if (previewCloseWatchdog.current != null) window.clearTimeout(previewCloseWatchdog.current);
   }, []);
 
   useEffect(() => {
@@ -307,10 +471,14 @@ export function App() {
   };
 
   const chooseInput = async (inputType: InputType) => {
-    const selected = inputType === "images" ? await selectImageSequence() : await selectVideo();
-    if (selected) {
-      store.setInputPath(selected, inputType);
-      await analyze(selected, store.quality);
+    try {
+      const selected = inputType === "images" ? await selectImageSequence() : await selectVideo();
+      if (selected) {
+        store.setInputPath(selected, inputType);
+        await analyze(selected, store.quality);
+      }
+    } catch (error) {
+      store.setError(messageOf(error));
     }
   };
 
@@ -360,6 +528,8 @@ export function App() {
     runElapsedOffset.current = 0;
     runStartedAt.current = Date.now();
     setLiveElapsedMs(0);
+    setFailureDialog(null);
+    pipelineCommandPending.current = true;
     store.beginRun();
     try {
       const result = await startPipeline(store.inputPath, store.quality, store.projectsRoot);
@@ -373,9 +543,16 @@ export function App() {
       }
       const message = messageOf(error);
       store.setError(message);
-      store.setPhase(message.includes("取消") || message.toLowerCase().includes("cancel") ? "cancelled" : "failed");
+      const latestStage = useAppStore.getState().latestEvent?.stage;
+      const cancelled = pipelineWasCancelled(error, latestStage);
+      store.setPhase(cancelled ? "cancelled" : "failed");
+      if (!cancelled) {
+        const fallbackStage = [...useAppStore.getState().events].reverse().find((event) => !["failed", "cancelled"].includes(event.stage))?.stage;
+        setFailureDialog(inferFailureDialog(error, fallbackStage));
+      }
     } finally {
       try { await refreshProjects(); } catch { /* the generated project remains on disk */ }
+      pipelineCommandPending.current = false;
     }
   };
 
@@ -389,6 +566,8 @@ export function App() {
     } catch {
       store.setEstimate(null);
     }
+    setFailureDialog(null);
+    pipelineCommandPending.current = true;
     store.beginRun();
     try {
       const result = await resumePipeline(project.id);
@@ -400,18 +579,44 @@ export function App() {
       setLiveElapsedMs(runElapsedOffset.current + backendElapsed);
       const message = messageOf(error);
       store.setError(message);
-      store.setPhase(message.includes("取消") || message.toLowerCase().includes("cancel") ? "cancelled" : "failed");
+      const latestStage = useAppStore.getState().latestEvent?.stage;
+      const cancelled = pipelineWasCancelled(error, latestStage);
+      store.setPhase(cancelled ? "cancelled" : "failed");
+      if (!cancelled) {
+        const fallbackStage = [...useAppStore.getState().events].reverse().find((event) => !["failed", "cancelled"].includes(event.stage))?.stage;
+        setFailureDialog(inferFailureDialog(error, fallbackStage, project.id));
+      }
     } finally {
       try { await refreshProjects(); } catch { /* the project remains on disk */ }
+      pipelineCommandPending.current = false;
     }
   };
 
   const removeProject = async (project: ProjectSummary) => {
+    if (deletingProjectId) return;
+    setDeletingProjectId(project.id);
     try {
+      await reconcileRuntimeState();
       if (await confirmAndDeleteProject(project)) {
         await refreshProjects();
       }
-    } catch (error) { store.setError(messageOf(error)); }
+    } catch (error) {
+      store.setError(messageOf(error));
+    } finally {
+      setDeletingProjectId((current) => current === project.id ? null : current);
+    }
+  };
+
+  const showProject = async (project: ProjectSummary) => {
+    if (revealingProjectId) return;
+    setRevealingProjectId(project.id);
+    try {
+      await withTimeout(revealProject(project), NATIVE_ACTION_TIMEOUT_MS, t("error.timeout"));
+    } catch (error) {
+      store.setError(t("error.openFolder", { detail: messageOf(error) }));
+    } finally {
+      setRevealingProjectId((current) => current === project.id ? null : current);
+    }
   };
 
   const releasePreviewSession = useCallback((projectId: string) => {
@@ -425,19 +630,52 @@ export function App() {
     return release;
   }, []);
 
+  const clearPreviewSession = useCallback((projectId: string, sessionId: number) => {
+    const active = activePreviewSession.current;
+    if (!active || active.projectId !== projectId || active.sessionId !== sessionId) return;
+    if (previewCloseWatchdog.current != null) {
+      window.clearTimeout(previewCloseWatchdog.current);
+      previewCloseWatchdog.current = null;
+    }
+    activePreviewSession.current = null;
+    if (useGaussianTransformStore.getState().descriptor?.projectId === projectId) closeGaussian();
+    setClosingPreviewProjectId((current) => current === projectId ? null : current);
+  }, [closeGaussian]);
+
+  const finishPreviewClose = useCallback(async (projectId: string, sessionId: number, forced = false) => {
+    const active = activePreviewSession.current;
+    if (!active || active.projectId !== projectId || active.sessionId !== sessionId) return;
+    if (forced) {
+      clearPreviewSession(projectId, sessionId);
+      store.setError(t("error.previewCleanupTimeout"));
+      void releasePreviewSession(projectId).catch(() => undefined);
+      return;
+    }
+    try {
+      await withTimeout(releasePreviewSession(projectId), PREVIEW_CLOSE_TIMEOUT_MS, t("error.previewCleanupTimeout"));
+    } catch (error) {
+      store.setError(messageOf(error));
+    } finally {
+      clearPreviewSession(projectId, sessionId);
+    }
+  }, [clearPreviewSession, messageOf, releasePreviewSession, store.setError, t]);
+
   const previewProject = async (project: ProjectSummary, options?: { reshoot?: boolean }) => {
-    if (project.status !== "completed" || openingPreviewProjectId || closingPreviewProjectId) return;
+    if (project.status !== "completed" || openingPreviewProjectId || closingPreviewProjectId === project.id) return;
     const previous = useGaussianTransformStore.getState().descriptor?.projectId;
     setOpeningPreviewProjectId(project.id);
     setReshootEntry(Boolean(options?.reshoot));
-    setDisposedPreviewProjectId(null);
     store.setError(null);
     try {
+      await reconcileRuntimeState();
       closeGaussian();
-      if (previous && previous !== project.id) await releasePreviewSession(previous);
+      if (previous) await withTimeout(releasePreviewSession(previous), PREVIEW_CLOSE_TIMEOUT_MS, t("error.previewCleanupTimeout"));
       const descriptor = await prepareGaussianPreview(project.id);
       releasedPreviewProjects.current.delete(project.id);
       loadGaussian(descriptor);
+      const sessionId = ++previewSessionSequence.current;
+      activePreviewSession.current = { projectId: project.id, sessionId };
+      setPreviewSessionId(sessionId);
       taskScrollPositions.current = {
         control: controlPaneRef.current?.scrollTop ?? 0,
         projects: projectsPaneRef.current?.scrollTop ?? 0,
@@ -495,41 +733,89 @@ export function App() {
     }
   };
 
-  const exitPreview = async () => {
-    const projectId = useGaussianTransformStore.getState().descriptor?.projectId;
-    if (closingPreviewProjectId) return;
-    if (projectId) setClosingPreviewProjectId(projectId);
-    setReshootEntry(false);
-    setViewMode("tasks");
+  const previewCompletedResult = () => {
+    const project = store.result && store.projects.find((item) => item.id === store.result?.projectId);
+    if (project) void previewProject(project);
   };
 
-  const previewRendererDisposed = useCallback((projectId: string) => {
-    setDisposedPreviewProjectId(projectId);
-  }, []);
+  const exportCompletedResult = async () => {
+    if (!store.result) return;
+    try {
+      await exportPly(store.result);
+    } catch (error) {
+      store.setError(messageOf(error));
+    }
+  };
 
-  useEffect(() => {
-    if (viewMode !== "tasks" || !closingPreviewProjectId || disposedPreviewProjectId !== closingPreviewProjectId) return;
-    const projectId = closingPreviewProjectId;
-    void releasePreviewSession(projectId)
-      .catch((error) => store.setError(messageOf(error)))
-      .finally(() => {
-        if (useGaussianTransformStore.getState().descriptor?.projectId === projectId) closeGaussian();
-        setDisposedPreviewProjectId((current) => current === projectId ? null : current);
-        setClosingPreviewProjectId((current) => current === projectId ? null : current);
-      });
-  }, [viewMode, closingPreviewProjectId, disposedPreviewProjectId, closeGaussian, releasePreviewSession, store.setError]);
+  const revealCompletedResult = async () => {
+    if (!store.result) return;
+    const project = store.projects.find((item) => item.id === store.result?.projectId);
+    if (project) await showProject(project);
+    else store.setError(t("failure.logsUnavailable"));
+  };
+
+  const closeFailureDialog = useCallback(() => {
+    if (failureDialogAction === null) setFailureDialog(null);
+  }, [failureDialogAction]);
+
+  const retryFailedProject = async () => {
+    const projectId = failureDialog?.projectId;
+    if (!projectId || failureDialogAction) return;
+    setFailureDialogAction("retry");
+    try {
+      const overview = await refreshProjects();
+      const project = overview.projects.find((item) => item.id === projectId);
+      if (!project) throw new Error(t("failure.logsUnavailable"));
+      setFailureDialog(null);
+      await resume(project);
+    } catch (error) {
+      store.setError(messageOf(error));
+    } finally {
+      setFailureDialogAction(null);
+    }
+  };
+
+  const openFailureLogs = async () => {
+    const projectId = failureDialog?.projectId;
+    if (!projectId || failureDialogAction) return;
+    setFailureDialogAction("logs");
+    try {
+      await withTimeout(revealProjectLogs(projectId), NATIVE_ACTION_TIMEOUT_MS, t("error.timeout"));
+    } catch (error) {
+      store.setError(t("error.openFolder", { detail: messageOf(error) }));
+    } finally {
+      setFailureDialogAction(null);
+    }
+  };
+
+  const exitPreview = async () => {
+    const active = activePreviewSession.current;
+    if (!active || closingPreviewProjectId) return;
+    setClosingPreviewProjectId(active.projectId);
+    setReshootEntry(false);
+    setViewMode("tasks");
+    if (previewCloseWatchdog.current != null) window.clearTimeout(previewCloseWatchdog.current);
+    previewCloseWatchdog.current = window.setTimeout(() => {
+      previewCloseWatchdog.current = null;
+      void finishPreviewClose(active.projectId, active.sessionId, true);
+    }, PREVIEW_CLOSE_TIMEOUT_MS);
+  };
+
+  const previewRendererDisposed = useCallback((projectId: string, disposedSessionId: number) => {
+    void finishPreviewClose(projectId, disposedSessionId);
+  }, [finishPreviewClose]);
 
   useEffect(() => () => {
-    const projectId = useGaussianTransformStore.getState().descriptor?.projectId;
-    if (projectId) {
-      queueMicrotask(() => void releasePreviewSession(projectId).catch(() => undefined));
+    const active = activePreviewSession.current;
+    if (active) {
+      void releasePreviewSession(active.projectId).catch(() => undefined);
     }
   }, [releasePreviewSession]);
 
   if (viewMode === "preview") {
     return <main className="app-shell preview-mode">
       <Suspense fallback={<section className="preview-pane active preview-workspace"><div className="preview-empty"><LoaderCircle className="spin" size={24} /><strong>{t("preview.preparingModule")}</strong></div></section>}>
-        <GaussianViewer onExit={exitPreview} onDisposed={previewRendererDisposed} pipelineRunning={isRunning} onStartReshoot={startReshoot} reshootEntry={reshootEntry} />
+        <GaussianViewer previewSessionId={previewSessionId} onExit={exitPreview} onDisposed={previewRendererDisposed} pipelineRunning={isRunning} onStartReshoot={startReshoot} reshootEntry={reshootEntry} />
       </Suspense>
       {reshootInputMenuOpen && <div className="reshoot-input-backdrop" role="dialog" aria-modal="true" aria-labelledby="reshoot-input-title">
         <section className="reshoot-input-dialog">
@@ -635,21 +921,42 @@ export function App() {
 
         {(isRunning || store.events.length > 0) && <section className="live-process">
           <div className="live-heading"><div><span className="live-dot" /><strong>{t("progress.title")}</strong></div><span className="mono">{store.progress.toFixed(1)}%</span></div>
-          <p className="current-message">{store.latestEvent ? localizePipelineMessage(locale, store.latestEvent.message) : store.progressMessage ? localizePipelineMessage(locale, store.progressMessage) : t("progress.preparing")}</p>
+          <p className="current-message">{currentMessage}</p>
           <div className="process-metrics">
             <span><small>{t("progress.stage")}</small><b>{currentStageLabel(store.latestEvent?.stage, activeStageIndex)}</b></span>
-            <span><small>{t("progress.progress")}</small><b>{liveProgressLabel}</b></span>
             <span><small>{t("progress.elapsed")}</small><b>{formatDuration(liveElapsedMs)}</b></span>
           </div>
           <ol className="stage-timeline">
-            {stages.map(([key, label], index) => <li key={key} className={index < activeStageIndex || store.phase === "completed" ? "done" : index === activeStageIndex && isRunning ? "active" : ""}><span /><b>{t(label)}</b>{index === activeStageIndex && isRunning && <small>{store.latestEvent?.indeterminate ? t("progress.running") : `${(store.latestEvent?.stageProgress ?? 0).toFixed(0)}%`}</small>}</li>)}
+            {stages.map(([key, label], index) => {
+              const terminalClass = index === activeStageIndex && store.phase === "failed" ? "failed" : index === activeStageIndex && store.phase === "cancelled" ? "cancelled" : "";
+              const className = index < activeStageIndex || store.phase === "completed"
+                ? "done"
+                : terminalClass || (index === activeStageIndex && isRunning ? "active" : "");
+              return <li key={key} className={className}><span /><b>{t(label)}</b>{index === activeStageIndex && isRunning && <small>{progressEvent?.indeterminate ? t("progress.running") : `${(progressEvent?.stageProgress ?? 0).toFixed(0)}%`}</small>}</li>;
+            })}
           </ol>
           <div className="log-toolbar"><span>{t("progress.log")}</span><small>{t("progress.logCount", { count: store.events.length })}</small></div>
-          <div className="live-log" aria-live="polite">
+          <div className="live-log" aria-live="polite" ref={liveLogRef} onScroll={updateLiveLogFollow}>
             {store.events.map((event, index) => <div className={`log-line ${event.level}`} key={`${event.sequence}-${index}`}><time>{new Date(event.timestamp).toLocaleTimeString(locale, { hour12: false })}</time><span>{event.engine ?? "system"}</span><p>{event.kind === "log" ? event.message : localizePipelineMessage(locale, event.message)}</p></div>)}
-            <div ref={logEnd} />
           </div>
           {isRunning && <button className="cancel-action" type="button" disabled={isCancellationRequested} onClick={() => void requestCancellation()}>{isCancellationRequested ? <LoaderCircle className="spin" size={13} /> : <Square size={12} fill="currentColor" />}{isCancellationRequested ? t("progress.terminating") : t("progress.cancel")}</button>}
+        </section>}
+
+        {store.phase === "completed" && store.result && <section className="completion-result" aria-labelledby="completion-result-title">
+          <div className="completion-result-heading"><div><span className="result-status-dot" /><strong id="completion-result-title">{t("result.title")}</strong></div><span>{t("result.completed")}</span></div>
+          <dl className="completion-result-stats">
+            <div><dt>{t("result.splats")}</dt><dd>{formatNumber(store.result.splatCount)}</dd></div>
+            <div><dt>{t("result.fileSize")}</dt><dd>{formatBytes(store.result.fileSize, locale)}</dd></div>
+            <div><dt>{t("result.registered")}</dt><dd>{formatNumber(store.result.registeredImages)} / {formatNumber(store.result.inputImages)}</dd></div>
+            <div><dt>{t("result.points")}</dt><dd>{formatNumber(store.result.points3d)}</dd></div>
+            <div><dt>{t("result.elapsed")}</dt><dd>{formatDuration(store.result.durationMs)}</dd></div>
+          </dl>
+          {store.result.registeredRatio < 0.8 && <p className="completion-warning" role="status"><CircleAlert size={15} />{t("result.lowRegistration", { value: (store.result.registeredRatio * 100).toFixed(1) })}</p>}
+          <div className="completion-result-actions">
+            <button type="button" disabled={!store.projects.some((project) => project.id === store.result?.projectId && project.status === "completed")} onClick={previewCompletedResult}><Eye size={14} />{t("project.preview")}</button>
+            <button type="button" onClick={() => void exportCompletedResult()}><Download size={14} />{t("result.export")}</button>
+            <button type="button" onClick={() => void revealCompletedResult()}><FolderOpen size={14} />{t("result.reveal")}</button>
+          </div>
         </section>}
 
         {store.error && <div className="inline-error"><CircleAlert size={16} /><span>{localizePipelineMessage(locale, store.error)}</span><button type="button" onClick={() => store.setError(null)}>{t("common.close")}</button></div>}
@@ -688,8 +995,8 @@ export function App() {
 
         {completed.length === 0 && unfinished.length === 0 && <div className="empty-state"><FileBox size={30} strokeWidth={1.4} /><strong>{t("history.emptyTitle")}</strong><p>{t("history.emptyHint")}</p></div>}
 
-        {completed.length > 0 && <div className="project-group"><div className="group-heading"><span>{t("history.completed")}</span><small>{t("history.projects", { count: completed.length })}</small></div>{completed.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={openingPreviewProjectId === project.id} previewDisabled={openingPreviewProjectId !== null || closingPreviewProjectId !== null} onPreview={(item) => void previewProject(item)} onReshoot={(item) => void previewProject(item, { reshoot: true })} onResume={() => undefined} onDelete={(item) => void removeProject(item)} />)}</div>}
-        {unfinished.length > 0 && <div className="project-group unfinished"><div className="group-heading"><span>{t("history.unfinished")}</span><small>{t("history.projects", { count: unfinished.length })}</small></div>{unfinished.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={false} previewDisabled onPreview={() => undefined} onReshoot={() => undefined} onResume={(item) => void resume(item)} onDelete={(item) => void removeProject(item)} />)}</div>}
+        {completed.length > 0 && <div className="project-group"><div className="group-heading"><span>{t("history.completed")}</span><small>{t("history.projects", { count: completed.length })}</small></div>{completed.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={openingPreviewProjectId === project.id} previewDisabled={openingPreviewProjectId !== null || closingPreviewProjectId === project.id} deleting={deletingProjectId === project.id} revealing={revealingProjectId === project.id} onPreview={(item) => void previewProject(item)} onReshoot={(item) => void previewProject(item, { reshoot: true })} onResume={() => undefined} onReveal={(item) => void showProject(item)} onDelete={(item) => void removeProject(item)} />)}</div>}
+        {unfinished.length > 0 && <div className="project-group unfinished"><div className="group-heading"><span>{t("history.unfinished")}</span><small>{t("history.projects", { count: unfinished.length })}</small></div>{unfinished.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={false} previewDisabled deleting={deletingProjectId === project.id} revealing={revealingProjectId === project.id} onPreview={() => undefined} onReshoot={() => undefined} onResume={(item) => void resume(item)} onReveal={(item) => void showProject(item)} onDelete={(item) => void removeProject(item)} />)}</div>}
       </section>
     </section>
     </div>
@@ -711,6 +1018,7 @@ export function App() {
         </div>
       </div>
     </div>}
+    {failureDialog && <FailureGuidanceDialog failure={failureDialog} action={failureDialogAction} onClose={closeFailureDialog} onRetry={() => void retryFailedProject()} onOpenLogs={() => void openFailureLogs()} />}
     {telemetryPreferences && !telemetryPreferences.consentDecided && <TelemetryPreferences mode="consent" preferences={telemetryPreferences} busy={telemetryBusy} onChange={(enabled) => void changeTelemetryConsent(enabled)} />}
     {telemetryPreferences && privacySettingsOpen && <TelemetryPreferences mode="settings" preferences={telemetryPreferences} busy={telemetryBusy} onChange={(enabled) => void changeTelemetryConsent(enabled)} onClose={() => setPrivacySettingsOpen(false)} />}
   </main>;

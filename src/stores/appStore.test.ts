@@ -48,12 +48,26 @@ describe("app store", () => {
     useAppStore.setState({
       video: { duration: 1, width: 1, height: 1, fps: 30, totalFrames: 30, codec: "h264", rotation: 0, pixelFormat: "yuv420p", hasAlpha: false },
       plan: { retentionRatio: 1, samplingFps: 30, estimatedFrames: 30 },
+      phase: "failed",
+      progress: 63,
+      progressMessage: "old task failed",
+      latestEvent: event(2, 63),
+      events: [event(1, 42), event(2, 63)],
+      error: "old error",
     });
     useAppStore.getState().setInputPath("E:\\Photos", "images");
-    expect(useAppStore.getState().inputType).toBe("images");
-    expect(useAppStore.getState().inputPath).toBe("E:\\Photos");
-    expect(useAppStore.getState().video).toBeNull();
-    expect(useAppStore.getState().plan).toBeNull();
+    expect(useAppStore.getState()).toMatchObject({
+      inputType: "images",
+      inputPath: "E:\\Photos",
+      video: null,
+      plan: null,
+      phase: "idle",
+      progress: 0,
+      progressMessage: "",
+      latestEvent: null,
+      events: [],
+      error: null,
+    });
   });
 
   it("keeps progress monotonic and ignores stale sequenced events", () => {
@@ -61,6 +75,14 @@ describe("app store", () => {
     useAppStore.getState().receiveEvent(event(1, 12));
     expect(useAppStore.getState().progress).toBe(42);
     expect(useAppStore.getState().events).toHaveLength(1);
+  });
+
+  it("does not let failed or cancelled terminal events force progress to 100%", () => {
+    useAppStore.getState().receiveEvent(event(1, 63));
+    useAppStore.getState().receiveEvent({ ...event(2, 100), stage: "failed", stageProgress: null });
+    expect(useAppStore.getState().progress).toBe(63);
+    useAppStore.getState().receiveEvent({ ...event(3, 100), stage: "cancelled", stageProgress: null });
+    expect(useAppStore.getState().progress).toBe(63);
   });
 
   it("caps the friendly live log at 500 entries", () => {

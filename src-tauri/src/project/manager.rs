@@ -277,6 +277,14 @@ pub async fn atomic_write_json<T: serde::Serialize>(path: &Path, value: &T) -> R
     Ok(())
 }
 
+pub(crate) async fn atomic_replace_file(source: &Path, destination: &Path) -> Result<()> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || atomic_replace(&source, &destination))
+        .await
+        .map_err(|error| SplatError::Process(format!("原子发布任务失败：{error}")))?
+}
+
 #[cfg(windows)]
 fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
     use std::{iter, os::windows::ffi::OsStrExt};
@@ -314,7 +322,12 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn copy_replace_for_encrypted_directory(source: &Path, destination: &Path) -> Result<()> {
-    let backup = destination.with_extension("json.bak");
+    let backup_extension = destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!("{extension}.bak"))
+        .unwrap_or_else(|| "bak".into());
+    let backup = destination.with_extension(backup_extension);
 
     if backup.exists() {
         std::fs::remove_file(&backup)?;

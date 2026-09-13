@@ -4,7 +4,7 @@
 
 This roadmap describes OOOSplat's product direction and implementation priorities. P0–P3 indicate relative priority; they are not release numbers and do not guarantee delivery dates.
 
-Current version: **0.4.0**. This release focuses on multiple input types, recoverable generation pipelines, clearer progress feedback, and non-destructive Gaussian editing.
+Current version: **0.4.1**. This release focuses on multiple input types, recoverable generation pipelines, clearer progress feedback, and non-destructive Gaussian editing.
 
 ## Product Principles
 

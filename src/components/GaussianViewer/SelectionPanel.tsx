@@ -2,6 +2,9 @@ import type { GaussianCrop } from "../../types/pipeline";
 import { useI18n } from "../../i18n";
 import { NumberField } from "./TransformPanel";
 
+const CROP_EXTENT_MIN = 0.000001;
+const CROP_EXTENT_MAX = 1e12;
+
 export function SelectionPanel({ crop, kind, onBegin, onChange, onCommit, onEnable }: {
   crop: GaussianCrop;
   kind: "sphere" | "box";
@@ -27,7 +30,7 @@ export function SelectionPanel({ crop, kind, onBegin, onChange, onCommit, onEnab
   const sizeField = (index: 0 | 1 | 2) => {
     if (activeCrop?.kind !== "box") return null;
     const axis = ["X", "Y", "Z"][index];
-    return <NumberField key={axis} label={axis} name={t("panel.boxSize", { axis })} value={activeCrop.size[index]} mode="scale" onBegin={onBegin} onCommit={onCommit} onChange={(value) => {
+    return <NumberField key={axis} label={axis} name={t("panel.boxSize", { axis })} value={activeCrop.size[index]} mode="scale" min={CROP_EXTENT_MIN} max={CROP_EXTENT_MAX} onBegin={onBegin} onCommit={onCommit} onChange={(value) => {
       const size = [...activeCrop.size] as [number, number, number];
       size[index] = value;
       onChange({ ...activeCrop, size });
@@ -42,7 +45,7 @@ export function SelectionPanel({ crop, kind, onBegin, onChange, onCommit, onEnab
     {activeCrop ? <>
       <section><h4>{t("panel.position")}</h4><div className="transform-fields">{centerField(0)}{centerField(1)}{centerField(2)}</div></section>
       <section><h4>{activeCrop.kind === "sphere" ? t("panel.radius") : t("panel.size")}</h4>{activeCrop.kind === "sphere"
-        ? <NumberField label="R" name={t("panel.sphereRadius")} value={activeCrop.radius} mode="scale" onBegin={onBegin} onCommit={onCommit} onChange={(radius) => onChange({ ...activeCrop, radius })} />
+        ? <NumberField label="R" name={t("panel.sphereRadius")} value={activeCrop.radius} mode="scale" min={CROP_EXTENT_MIN} max={CROP_EXTENT_MAX} onBegin={onBegin} onCommit={onCommit} onChange={(radius) => onChange({ ...activeCrop, radius })} />
         : <div className="transform-fields">{sizeField(0)}{sizeField(1)}{sizeField(2)}</div>}</section>
     </> : <div className="selection-empty">
       <p>{t("panel.noCrop", { kind: kindLabel })}</p>
