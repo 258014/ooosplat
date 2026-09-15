@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::{
     engines::MapperBackend,
     presets::Quality,
-    video::{expected_kept_frames, FramePlan, VideoInfo},
+    video::{expected_kept_frames, resolved_filter_config, FramePlan, VideoInfo},
 };
 
 const INCREMENTAL_RECONSTRUCTION_COEFFICIENT: f64 = 176.0;
@@ -24,7 +24,10 @@ pub fn expected_mapped_frames(plan: &FramePlan, quality: Quality) -> u64 {
     if !preset.enable_smart_filter {
         return plan.estimated_frames.max(1);
     }
-    expected_kept_frames(plan.estimated_frames, &preset.smart_filter_config)
+    expected_kept_frames(
+        plan.estimated_frames,
+        &resolved_filter_config(&preset, plan.sampling_fps),
+    )
 }
 
 fn reconstruction_estimate_ms(frames: u64, backend: MapperBackend) -> f64 {
@@ -314,6 +317,7 @@ fn median(values: &[f64]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::{FrameSelectionStrategy, SmartFrameSelection};
 
     fn video() -> VideoInfo {
         VideoInfo {
@@ -402,7 +406,10 @@ mod tests {
         assert!(mapped < plan.estimated_frames);
         assert_eq!(
             mapped,
-            expected_kept_frames(plan.estimated_frames, &quality.preset().smart_filter_config)
+            expected_kept_frames(
+                plan.estimated_frames,
+                &resolved_filter_config(&quality.preset(), plan.sampling_fps)
+            )
         );
 
         let estimate = estimate_runtime(&video(), &plan, quality, &[]);
@@ -415,14 +422,30 @@ mod tests {
 
     #[test]
     fn higher_quality_presets_map_more_frames() {
-        let plan = plan_with_frames(600);
-        let fast = expected_mapped_frames(&plan, Quality::Fast);
-        let balanced = expected_mapped_frames(&plan, Quality::Balanced);
-        let high = expected_mapped_frames(&plan, Quality::High);
-        // keep_per_window is 2/3/4 across the presets, so the frames that reach
-        // COLMAP must grow with the quality tier.
-        assert!(fast < balanced && balanced < high);
-        assert!(high <= plan.estimated_frames);
+        // 每档的抽帧数并不相同：目标密度越高，候选密度与最终保留数都更高。
+        // 早前这里把三档的 estimated_frames 钉成同一个值，掩盖了真实关系。
+        let video = VideoInfo {
+            duration: 60.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            total_frames: 1800,
+            codec: "h264".into(),
+            rotation: 0,
+            pixel_format: "yuv420p".into(),
+            has_alpha: false,
+        };
+        let plans = [Quality::Fast, Quality::Balanced, Quality::High]
+            .map(|quality| SmartFrameSelection.create_plan(&video, &quality.preset()));
+        let fast = expected_mapped_frames(&plans[0], Quality::Fast);
+        let balanced = expected_mapped_frames(&plans[1], Quality::Balanced);
+        let high = expected_mapped_frames(&plans[2], Quality::High);
+        assert!(fast > 0, "每档都必须保留可用的帧数");
+        assert!(
+            fast < balanced && balanced < high,
+            "{fast} {balanced} {high}"
+        );
+        assert!(high <= plans[2].estimated_frames);
     }
 
     #[test]

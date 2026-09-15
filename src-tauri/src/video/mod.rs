@@ -10,7 +10,8 @@ pub use frame_filter::{
     FrameFilterError, FrameMetrics, FILTER_STRATEGY_VERSION,
 };
 pub use frame_plan::{
-    FramePlan, FrameSelectionStrategy, SmartFrameSelection, UniformRatioFrameSelection,
+    resolve_frame_rates, resolved_filter_config, resolved_keep_per_window, FramePlan,
+    FrameSelectionStrategy, SmartFrameSelection, UniformRatioFrameSelection,
 };
 pub use image_sequence::{
     analyze_image_sequence, create_plan as create_image_plan, is_image_file, list_images,

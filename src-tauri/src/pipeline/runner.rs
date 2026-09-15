@@ -2124,8 +2124,10 @@ async fn filter_checkpoint_complete(
     let Some(filtered_frames) = frames.filtered_frames.filter(|count| *count > 0) else {
         return Ok(false);
     };
-    let expected_hash =
-        crate::video::filter_config_hash(&state.preset.preset().smart_filter_config, source_frames);
+    let expected_hash = crate::video::filter_config_hash(
+        &crate::video::resolved_filter_config(&state.preset.preset(), frames.sampling_fps),
+        source_frames,
+    );
     if frames.filter_config_hash.as_deref() != Some(expected_hash.as_str()) {
         return Ok(false);
     }
@@ -2163,7 +2165,8 @@ async fn ensure_filter_checkpoint(
     if prepared.has_alpha {
         reset_directory(&paths.masks_filtered).await?;
     }
-    let config = state.preset.preset().smart_filter_config;
+    let config =
+        crate::video::resolved_filter_config(&state.preset.preset(), prepared.plan.sampling_fps);
     let input = paths.frames.clone();
     let output = paths.frames_filtered.clone();
     let masks = paths.masks.clone();
@@ -2563,7 +2566,7 @@ mod tests {
 
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 100,
             extracted_frames: Some(100),
             image_format: Some("jpeg".into()),
@@ -2586,7 +2589,7 @@ mod tests {
         let mut state = PipelineStateFile::created(Quality::Balanced);
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 100,
             extracted_frames: Some(100),
             image_format: Some("jpeg".into()),
@@ -2639,7 +2642,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 2,
             extracted_frames: Some(2),
             image_format: Some("jpeg".into()),
@@ -2706,7 +2709,7 @@ mod tests {
 
         // 对齐到当前档位解析出的值后，断点重新可用。
         if let Some(frames) = state.frames.as_mut() {
-            frames.sampling_fps = 22.5;
+            frames.sampling_fps = 20.0;
         }
         assert!(prepared_frames_from_checkpoint(&paths, &state)
             .await
@@ -2804,7 +2807,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("png".into()),
@@ -2856,7 +2859,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("jpeg".into()),
@@ -3059,7 +3062,7 @@ mod tests {
         let mut state = PipelineStateFile::created(Quality::Balanced);
         let plan = FramePlan {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 4,
         };
         state.frames = Some(FrameState {
@@ -3102,10 +3105,10 @@ mod tests {
             .await
             .unwrap();
         let mut state = PipelineStateFile::created(Quality::Balanced);
-        let config = state.preset.preset().smart_filter_config;
+        let config = crate::video::resolved_filter_config(&state.preset.preset(), 20.0);
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 2,
             extracted_frames: Some(2),
             image_format: Some("jpeg".into()),
@@ -3152,7 +3155,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("jpeg".into()),
@@ -3187,10 +3190,10 @@ mod tests {
             .await
             .unwrap();
         let mut state = PipelineStateFile::created(Quality::Balanced);
-        let config = state.preset.preset().smart_filter_config;
+        let config = crate::video::resolved_filter_config(&state.preset.preset(), 20.0);
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("png".into()),
@@ -3231,7 +3234,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 22.5,
+            sampling_fps: 20.0,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("jpeg".into()),

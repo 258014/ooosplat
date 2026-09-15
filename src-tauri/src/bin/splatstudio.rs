@@ -134,7 +134,8 @@ async fn execute(cli: Cli) -> Result<()> {
             )
             .await?;
             let filtered_output = output.with_file_name("frames.filtered");
-            let config = quality.preset().smart_filter_config;
+            let config =
+                ooo_splat::video::resolved_filter_config(&quality.preset(), plan.sampling_fps);
             let outcome = tokio::task::spawn_blocking({
                 let output = output.clone();
                 let filtered_output = filtered_output.clone();

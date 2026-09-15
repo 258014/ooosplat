@@ -134,8 +134,8 @@ impl Quality {
                 feature_max_image_size: 1280,
                 feature_max_num_features: 8192,
                 // 沿用比例公式：候选 = target × 1.5，行为与 v2 一致。
-                target_fps: None,
-                candidate_fps: None,
+                target_fps: Some(6.0),
+                candidate_fps: Some(12.0),
             },
             Self::Balanced => QualityPreset {
                 frame_retention_ratio: 0.50,
@@ -155,8 +155,8 @@ impl Quality {
                 feature_max_image_size: 1600,
                 feature_max_num_features: 8192,
                 // 沿用比例公式：候选 = target × 1.5，行为与 v2 一致。
-                target_fps: None,
-                candidate_fps: None,
+                target_fps: Some(8.0),
+                candidate_fps: Some(20.0),
             },
             Self::High => QualityPreset {
                 frame_retention_ratio: 1.00,
@@ -171,8 +171,8 @@ impl Quality {
                 feature_max_image_size: 2000,
                 feature_max_num_features: 16384,
                 // 沿用比例公式：候选 = target × 1.5，行为与 v2 一致。
-                target_fps: None,
-                candidate_fps: None,
+                target_fps: Some(10.0),
+                candidate_fps: Some(30.0),
             },
         }
     }
@@ -235,8 +235,8 @@ mod tests {
             Quality::Balanced.preset(),
             Quality::High.preset(),
         ] {
-            assert_eq!(preset.target_fps, None);
-            assert_eq!(preset.candidate_fps, None);
+            assert!(preset.target_fps.is_some() && preset.candidate_fps.is_some());
+            // 具体数值由 absolute_frame_rates_follow_the_ladder 精确断言。
         }
     }
 

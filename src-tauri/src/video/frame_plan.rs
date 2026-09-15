@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{presets::QualityPreset, video::VideoInfo};
+use crate::{
+    presets::QualityPreset,
+    video::{FrameFilterConfig, VideoInfo},
+};
 
 /// 候选超采样比例：`candidate_fps` 未显式配置时，按 target 的 1.5 倍取候选密度。
 ///
@@ -57,6 +60,43 @@ pub fn resolve_frame_rates(source_fps: f64, preset: &QualityPreset) -> (f64, f64
     (target, candidate)
 }
 
+/// 由目标密度反推窗口配额：`keep_per_window ≈ target_fps / candidate_fps × window_size`。
+///
+/// 这是让 `target_fps` 真正决定**最终**保留密度的一步：候选密度由 `candidate_fps` 决定，
+/// 过滤阶段按 `keep_per_window / window_size` 的比例保留，两者相乘才是最终密度。
+/// 配额夹在 `1..=window_size`：至少留一帧，且不会超过窗口本身（否则配额永远不生效）。
+pub fn resolved_keep_per_window(
+    target_fps: f64,
+    candidate_fps: f64,
+    config: &FrameFilterConfig,
+) -> usize {
+    if !target_fps.is_finite()
+        || !candidate_fps.is_finite()
+        || target_fps <= 0.0
+        || candidate_fps <= 0.0
+    {
+        return config.keep_per_window;
+    }
+    let window = config.window_size.max(1);
+    let quota = (target_fps / candidate_fps * window as f64).round();
+    (quota.max(1.0) as usize).min(window)
+}
+
+/// 本次运行**实际使用**的过滤配置。
+///
+/// 档位显式配置了 `target_fps` 时，窗口配额由目标密度与候选密度共同反推，
+/// 这样"最终保留密度"就由 `target_fps` 决定，而不是由 `keep_per_window` 的
+/// 历史取值间接决定。未配置 `target_fps` 时原样返回档位里的配置（行为不变）。
+///
+/// 与 [`resolve_frame_rates`] 不同，这里不需要源帧率：两个输入都是绝对帧率。
+pub fn resolved_filter_config(preset: &QualityPreset, candidate_fps: f64) -> FrameFilterConfig {
+    let mut config = preset.smart_filter_config;
+    let Some(target) = preset.target_fps else {
+        return config;
+    };
+    config.keep_per_window = resolved_keep_per_window(target, candidate_fps, &config);
+    config
+}
 impl FrameSelectionStrategy for SmartFrameSelection {
     fn create_plan(&self, video: &VideoInfo, preset: &QualityPreset) -> FramePlan {
         // 抽帧率就是候选帧密度：过滤发生在 ffmpeg 抽帧之后，先按候选密度多抽一些。
@@ -91,8 +131,8 @@ mod tests {
     fn smart_selection_oversamples_for_post_filtering() {
         let plan =
             SmartFrameSelection.create_plan(&thirty_fps_video(), &Quality::Balanced.preset());
-        assert_eq!(plan.sampling_fps, 22.5);
-        assert_eq!(plan.estimated_frames, 1_350);
+        assert_eq!(plan.sampling_fps, 20.0);
+        assert_eq!(plan.estimated_frames, 1_200);
     }
 
     fn thirty_fps_video() -> VideoInfo {
@@ -110,15 +150,20 @@ mod tests {
     }
 
     /// 未配置绝对帧率时，必须与 v2 的 `retention_ratio × 1.5 × source` 逐位一致。
+    ///
+    /// 三档出厂预设现在都配了绝对帧率，所以这里用显式 `None` 的档位来锁这条回退路径。
     #[test]
     fn legacy_ratio_formula_is_unchanged_when_rates_are_unset() {
-        for preset in [
+        for base in [
             Quality::Fast.preset(),
             Quality::Balanced.preset(),
             Quality::High.preset(),
         ] {
-            assert_eq!(preset.target_fps, None);
-            assert_eq!(preset.candidate_fps, None);
+            let preset = QualityPreset {
+                target_fps: None,
+                candidate_fps: None,
+                ..base
+            };
             for fps in [12.0_f64, 24.0, 29.97, 30.0, 59.94, 120.0] {
                 let video = VideoInfo {
                     fps,
@@ -133,6 +178,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 三档必须配置绝对帧率，且目标密度随档位递增。
+    #[test]
+    fn absolute_frame_rates_follow_the_ladder() {
+        let ladder = [
+            (Quality::Fast, 6.0, 12.0),
+            (Quality::Balanced, 8.0, 20.0),
+            (Quality::High, 10.0, 30.0),
+        ];
+        for (quality, target, candidate) in ladder {
+            let preset = quality.preset();
+            assert_eq!(preset.target_fps, Some(target), "target_fps 档位值");
+            assert_eq!(
+                preset.candidate_fps,
+                Some(candidate),
+                "candidate_fps 档位值"
+            );
+            assert!(target <= candidate, "候选密度不得低于目标密度");
+        }
+    }
+
+    /// 这是本次改动的核心不变量：**最终保留密度由 `target_fps` 决定**，
+    /// 不再由 `keep_per_window` 的历史取值间接决定，也不随源帧率漂移。
+    #[test]
+    fn target_fps_governs_the_final_kept_density() {
+        for (quality, target) in [
+            (Quality::Fast, 6.0_f64),
+            (Quality::Balanced, 8.0),
+            (Quality::High, 10.0),
+        ] {
+            for fps in [24.0_f64, 30.0, 60.0] {
+                let duration = 60.0;
+                let video = VideoInfo {
+                    duration,
+                    fps,
+                    total_frames: (duration * fps).round() as u64,
+                    ..thirty_fps_video()
+                };
+                let preset = quality.preset();
+                let plan = SmartFrameSelection.create_plan(&video, &preset);
+                let config = resolved_filter_config(&preset, plan.sampling_fps);
+                let kept = crate::video::expected_kept_frames(plan.estimated_frames, &config);
+                let final_fps = kept as f64 / duration;
+                assert!(
+                    (final_fps - target).abs() <= 1.0,
+                    "{quality:?} @ {fps}fps：最终密度 {final_fps:.2} fps 偏离目标 {target} fps"
+                );
+            }
+        }
+    }
+
+    /// 配额反推本身的边界：夹在 `1..=window_size`，非法输入退回档位原值。
+    #[test]
+    fn resolved_quota_is_clamped_and_safe() {
+        let config = FrameFilterConfig::balanced();
+        let window = config.window_size;
+        assert_eq!(resolved_keep_per_window(8.0, 20.0, &config), 4);
+        assert_eq!(resolved_keep_per_window(30.0, 20.0, &config), window);
+        assert_eq!(resolved_keep_per_window(0.01, 20.0, &config), 1);
+        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                resolved_keep_per_window(bad, 20.0, &config),
+                config.keep_per_window,
+                "非法 target={bad} 必须退回档位原值"
+            );
+            assert_eq!(
+                resolved_keep_per_window(8.0, bad, &config),
+                config.keep_per_window,
+                "非法 candidate={bad} 必须退回档位原值"
+            );
+        }
+        // 未配置 target_fps 时，档位里的配额原样保留（行为不变）。
+        let unset = QualityPreset {
+            target_fps: None,
+            candidate_fps: None,
+            ..Quality::Balanced.preset()
+        };
+        assert_eq!(
+            resolved_filter_config(&unset, 20.0).keep_per_window,
+            unset.smart_filter_config.keep_per_window
+        );
     }
 
     /// 显式候选密度按绝对值生效，且绝不突破源帧率。
