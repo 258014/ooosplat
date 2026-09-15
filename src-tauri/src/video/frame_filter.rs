@@ -825,24 +825,19 @@ fn decide_windows(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
                 motion_reference = Some(DiffReference::from_frame(frame));
             }
         }
-        // 3) 配额内按清晰度淘汰：窗口首个合格帧是时序锚点，必须保留，只在其余候选中淘汰。
+        // 3) 配额内按**间距**淘汰：同一窗口里把挨在一起的帧都留下，帧间基线太小，
+        //    它们最容易在 mapper 里配不上（实测：帧更密的保留集注册率反而更低）。
+        //    这里保序地取最分散的子集：首帧锚点必留，其余用贪心最远点挑选。
         if qualified.len() > config.keep_per_window {
-            let mut rest = qualified[1..].to_vec();
-            rest.sort_by(|left, right| {
-                window[*right]
-                    .metrics
-                    .laplacian_variance
-                    .partial_cmp(&window[*left].metrics.laplacian_variance)
-                    .unwrap_or(Ordering::Equal)
-            });
-            for index in rest
-                .into_iter()
-                .skip(config.keep_per_window.saturating_sub(1))
-            {
-                window[index].metrics.kept = false;
-                window[index].metrics.reject_reason = Some("window_overflow".into());
+            let subset = spread_subset(&qualified, config.keep_per_window);
+            for index in &qualified {
+                if !subset.contains(index) {
+                    window[*index].metrics.kept = false;
+                    window[*index].metrics.reject_reason = Some("window_overflow".into());
+                }
             }
         }
+
         // 4) 配额保底：被曝光门裁掉、但仍保留可用细节的帧，按清晰度回填到配额。
         //    重建需要足够的视角覆盖，所以宁可多几帧近似重复，也不让窗口塌成「每窗一帧」。
         //    低细节帧（blur）不参与回填——无纹理帧补进来对匹配没有帮助，仍由第一层兜底保证至少一帧。
@@ -924,6 +919,40 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
     }
 }
 
+/// 在一组**升序**的候选下标里保序地取 `keep` 个"最分散"的：首帧锚点必留，
+/// 其余每次选"距已选集合最近邻最远"的那个——让保留帧之间的基线尽量大，
+/// 从而提高它们能被 mapper 注册的概率。并列时取更靠前的（结果确定）。
+fn spread_subset(qualified: &[usize], keep: usize) -> Vec<usize> {
+    if keep == 0 {
+        return Vec::new();
+    }
+    if keep >= qualified.len() {
+        return qualified.to_vec();
+    }
+    let mut selected = vec![qualified[0]];
+    while selected.len() < keep {
+        let mut best: Option<(usize, usize)> = None;
+        for candidate in qualified {
+            if selected.contains(candidate) {
+                continue;
+            }
+            let nearest = selected
+                .iter()
+                .map(|chosen| chosen.abs_diff(*candidate))
+                .min()
+                .unwrap_or(0);
+            if best.is_none_or(|(_, distance)| nearest > distance) {
+                best = Some((*candidate, nearest));
+            }
+        }
+        match best {
+            Some((index, _)) => selected.push(index),
+            None => break,
+        }
+    }
+    selected.sort_unstable();
+    selected
+}
 fn best_laplacian_index(window: &[AnalyzedFrame]) -> Option<usize> {
     (0..window.len()).max_by(|left, right| {
         window[*left]
@@ -2394,6 +2423,82 @@ mod tests {
             percentile(&legacy_sorted, 0.90),
             config.min_diff_score,
             below,
+        );
+    }
+
+    /// 配额选择必须取"最分散"的子集：挨在一起的帧基线太小，最容易配不上。
+    #[test]
+    fn quota_selection_prefers_the_most_separated_frames() {
+        // 首帧锚点必留，其余取距已选集合最近邻最远的。
+        assert_eq!(spread_subset(&[0, 1, 2, 3, 9], 3), vec![0, 3, 9]);
+        // 配额不小于候选数时原样返回（保序）。
+        assert_eq!(spread_subset(&[4, 7, 8], 5), vec![4, 7, 8]);
+        // 只留一张时取首帧锚点；配额为 0 时不选。
+        assert_eq!(spread_subset(&[2, 5, 9], 1), vec![2]);
+        assert!(spread_subset(&[2, 5, 9], 0).is_empty());
+        // 结果必须保序，且元素都来自候选集合。
+        let picked = spread_subset(&[1, 2, 3, 10, 11, 20], 4);
+        assert!(picked.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(picked
+            .iter()
+            .all(|index| [1, 2, 3, 10, 11, 20].contains(index)));
+        // 均匀间隔的候选里，取 3 张就是首、中、尾。
+        assert_eq!(spread_subset(&[0, 1, 2, 3, 4], 3), vec![0, 2, 4]);
+    }
+    /// A/B 对照器械：按指定配置把一个目录真实过滤一次，并打印保留量。
+    ///
+    /// 环境变量：`OOOSPLAT_AB_IN`、`OOOSPLAT_AB_OUT`、`OOOSPLAT_AB_LEGACY=1`、
+    /// `OOOSPLAT_AB_MOTION=1`、`OOOSPLAT_AB_KEEP=<keep_per_window>`、`OOOSPLAT_AB_FPS=<sampling_fps>`。
+    /// 默认 `#[ignore]`，只用于真实素材对照，不参与常规测试。
+    #[test]
+    #[ignore]
+    fn filter_directory_for_comparison() {
+        let (Ok(input), Ok(output)) = (
+            std::env::var("OOOSPLAT_AB_IN"),
+            std::env::var("OOOSPLAT_AB_OUT"),
+        ) else {
+            eprintln!("未设置 OOOSPLAT_AB_IN / OOOSPLAT_AB_OUT，跳过");
+            return;
+        };
+        let config = FrameFilterConfig {
+            redundancy_metric: if std::env::var("OOOSPLAT_AB_LEGACY").is_ok() {
+                RedundancyMetric::LegacyGrayDiff
+            } else {
+                RedundancyMetric::DualThreshold
+            },
+            enable_motion_candidates: std::env::var("OOOSPLAT_AB_MOTION").is_ok(),
+            ..FrameFilterConfig::fast()
+        };
+        let config = match std::env::var("OOOSPLAT_AB_KEEP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            Some(keep) => FrameFilterConfig {
+                keep_per_window: keep,
+                ..config
+            },
+            None => config,
+        };
+        let sampling_fps = std::env::var("OOOSPLAT_AB_FPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(27.0);
+        let started = std::time::Instant::now();
+        let outcome =
+            filter_frames_at_fps(Path::new(&input), Path::new(&output), &config, sampling_fps)
+                .unwrap();
+        println!(
+            "AB 结果：保留 {}/{} 帧（冗余拒 {}，曝光拒 {}，模糊拒 {}，配额淘汰 {}，兜底 {}，运动候选 {}），耗时 {:.1}s → {}",
+            outcome.kept_frames,
+            outcome.total_frames,
+            outcome.rejected_redundant,
+            outcome.rejected_exposure,
+            outcome.rejected_blur,
+            outcome.rejected_window_overflow,
+            outcome.forced_keeps,
+            outcome.motion_candidates,
+            started.elapsed().as_secs_f64(),
+            output,
         );
     }
 }
