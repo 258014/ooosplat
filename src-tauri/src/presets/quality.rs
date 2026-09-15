@@ -133,8 +133,11 @@ impl Quality {
                 sequential_overlap: 12,
                 feature_max_image_size: 1280,
                 feature_max_num_features: 8192,
-                // 沿用比例公式：候选 = target × 1.5，行为与 v2 一致。
-                target_fps: Some(6.0),
+                // 候选密度沿用 v2 的 12 帧/秒；目标密度 4.8 帧/秒是实测取的——
+                // 同一段手持素材上 6.0 fps（198 帧）注册率 100%、4.8 fps（160 帧）
+                // 95.0%，而 3.6 fps（121 帧）跌到 57.9% 且重建分裂成 3 块。
+                // 取 4.8 是"少 20% 帧"与"注册率仍远高于 80% 良好线"的折中。
+                target_fps: Some(4.8),
                 candidate_fps: Some(12.0),
             },
             Self::Balanced => QualityPreset {

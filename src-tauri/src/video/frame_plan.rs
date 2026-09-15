@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn absolute_frame_rates_follow_the_ladder() {
         let ladder = [
-            (Quality::Fast, 6.0, 12.0),
+            (Quality::Fast, 4.8, 12.0),
             (Quality::Balanced, 8.0, 20.0),
             (Quality::High, 10.0, 30.0),
         ];
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn target_fps_governs_the_final_kept_density() {
         for (quality, target) in [
-            (Quality::Fast, 6.0_f64),
+            (Quality::Fast, 4.8_f64),
             (Quality::Balanced, 8.0),
             (Quality::High, 10.0),
         ] {
