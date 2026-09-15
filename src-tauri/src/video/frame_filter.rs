@@ -15,8 +15,9 @@ use super::image_sequence::is_image_file;
 /// 使下游与断点续跑能够判断已有的审计产物是否由同一套策略生成。
 /// v2：曝光改为「序列自适应门限 + 配额保底」，绝对阈值由 0.02 校准到 0.55，裁切判定改为 >=254 / <=1。
 /// v3：时序冗余筛选的参考帧改为「序列中最近一张**保留**帧」（跨窗口携带，不再在窗口边界重置），
-///     新增 gray_diff / gradient_diff / motion_score 三项度量，并把默认判定量切换为
-///     `DualThreshold`（依据：真实素材连续帧实测，近重复素材上旧量剔 39.5%、双门限剔 70.6%）。
+///     新增 gray_diff / gradient_diff / motion_score 三项度量，默认判定量切换为 `DualThreshold`
+///     （依据：真实素材连续帧实测，近重复素材上旧量剔 39.5%、双门限剔 70.6%），
+///     并默认开启运动候选池（每窗最多补 1 张，从窗口配额内分配，不抬高总上界）。
 pub const FILTER_STRATEGY_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -54,7 +55,10 @@ pub struct FrameFilterConfig {
     pub redundancy_metric: RedundancyMetric,
     /// 是否启用运动候选池：被模糊门拒下、但确有明显变化且清晰度仍可用的帧，
     /// 可以从**窗口配额内**争取名额（不额外增加保留帧总数）。
-    /// 默认关闭：真实素材 A/B 完成前不改变默认筛选结果。
+    ///
+    /// 默认开启：快速运动段整段被判模糊时，旧逻辑只能靠整窗兜底留一帧，
+    /// 匹配图会在这一段断裂。开启后每个窗口最多补 `motion_candidate_quota` 张，
+    /// 清晰帧充足时一张不进、总保留帧数上界不变。
     pub enable_motion_candidates: bool,
     /// 每个窗口最多由运动候选补进的名额。候选只在清晰帧不足配额时补位，
     /// 绝不会把已经入选的清晰帧挤掉。
@@ -102,7 +106,7 @@ impl FrameFilterConfig {
             gray_diff_weight: 1.0,
             gradient_diff_weight: 1.0,
             redundancy_metric: RedundancyMetric::DualThreshold,
-            enable_motion_candidates: false,
+            enable_motion_candidates: true,
             motion_candidate_quota: 1,
             motion_candidate_min_quality_ratio: 0.6,
             enable_adaptive_threshold: false,
@@ -127,7 +131,7 @@ impl FrameFilterConfig {
             gray_diff_weight: 1.0,
             gradient_diff_weight: 1.0,
             redundancy_metric: RedundancyMetric::DualThreshold,
-            enable_motion_candidates: false,
+            enable_motion_candidates: true,
             motion_candidate_quota: 1,
             motion_candidate_min_quality_ratio: 0.6,
             enable_adaptive_threshold: false,
@@ -152,7 +156,7 @@ impl FrameFilterConfig {
             gray_diff_weight: 1.0,
             gradient_diff_weight: 1.0,
             redundancy_metric: RedundancyMetric::DualThreshold,
-            enable_motion_candidates: false,
+            enable_motion_candidates: true,
             motion_candidate_quota: 1,
             motion_candidate_min_quality_ratio: 0.6,
             enable_adaptive_threshold: false,
@@ -2090,16 +2094,30 @@ mod tests {
         ]
     }
 
+    /// 三档默认都开启运动候选池：快速运动段整段被判模糊时，旧逻辑只能靠整窗兜底
+    /// 留一帧，匹配图会在这段断裂。
     #[test]
-    fn motion_candidates_are_disabled_by_default() {
-        assert!(!FrameFilterConfig::balanced().enable_motion_candidates);
+    fn motion_candidates_are_enabled_by_default() {
+        for preset in [
+            FrameFilterConfig::fast(),
+            FrameFilterConfig::balanced(),
+            FrameFilterConfig::high(),
+        ] {
+            assert!(preset.enable_motion_candidates);
+            assert_eq!(preset.motion_candidate_quota, 1);
+            assert_eq!(preset.motion_candidate_min_quality_ratio, 0.6);
+        }
+    }
+
+    /// 关掉开关时必须回到旧行为：模糊帧保持被拒。
+    #[test]
+    fn disabled_motion_candidates_leave_blurred_frames_rejected() {
         let config = FrameFilterConfig {
             enable_motion_candidates: false,
             ..motion_config()
         };
         let mut frames = motion_fixture(&config);
         decide_windows(&mut frames, &config);
-        // 关闭时模糊帧必须保持被拒：默认结果与 v2 一致。
         assert!(!frames[1].metrics.kept);
         assert!(!frames[1].metrics.is_motion_candidate);
         assert_eq!(frames[1].metrics.reject_reason.as_deref(), Some("blur"));
