@@ -253,6 +253,26 @@ mod tests {
         assert_eq!(Quality::High.preset().feature_max_num_features, 16_384);
     }
 
+    /// 匹配器的时序邻域必须覆盖筛选允许的最大帧间隔。
+    ///
+    /// `backfill_gaps` 只保证相邻保留帧的间隔不超过 `window_size`（筛选自己知道的上限），
+    /// 而顺序匹配真正能连上的范围是 `sequential_overlap`。两者是隐式耦合：一旦某档把
+    /// overlap 调到小于 window_size，某个窗口末尾与下一个窗口开头之间就会出现匹配器
+    /// 覆盖不到的断层，症状是重建分裂成多个模型——而不是报错。这条断言把耦合显式化。
+    #[test]
+    fn sequential_overlap_covers_the_largest_gap_the_filter_can_leave() {
+        for quality in [Quality::Fast, Quality::Balanced, Quality::High] {
+            let preset = quality.preset();
+            let window = preset.smart_filter_config.window_size;
+            assert!(
+                preset.sequential_overlap as usize >= window,
+                "{quality:?}：sequential_overlap={} 小于 window_size={window}，\
+                 筛选留下的最大间隔会超出匹配器的邻域范围",
+                preset.sequential_overlap
+            );
+        }
+    }
+
     #[test]
     fn feature_count_never_drops_below_the_pose_accuracy_floor() {
         // Below 8192 features per image, pose accuracy measurably degrades.

@@ -698,7 +698,11 @@ fn effective_redundancy_gates(
 }
 
 fn decide_windows(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
-    // 下游 COLMAP 使用 sequential_matcher --SequentialMatching.overlap 10，依赖帧的时序邻域关系建立匹配图。若采用全局按质量排序取 Top-N，会抽出时间上跳跃的帧，导致匹配图断裂、mapper 分块失败，重建直接失败。
+    // 下游 COLMAP 用 sequential_matcher 建匹配图，`--SequentialMatching.overlap` 由档位给
+    // （Fast 12 / Balanced 15 / High 20），所以选帧必须保住"保留帧之间不要跳太远"这一条：
+    // 若按质量全局取 Top-N，抽出的帧在时间上跳跃，匹配图会断裂、mapper 分块失败。
+    // 筛选自己保证的最大间隔是 `window_size`（见 `backfill_gaps`），档位侧由
+    // `sequential_overlap_covers_the_largest_gap_the_filter_can_leave` 断言 overlap >= window_size。
     let (over_gate, under_gate) = adaptive_exposure_gates(frames, config);
     // 参考帧跨窗口携带：过滤会丢弃中间帧，窗口边界若重置参考，边界附近就会重新
     // 接纳与上一窗尾重复的画面。这是 v3 相对 v2 的语义变化。
