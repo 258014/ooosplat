@@ -2239,6 +2239,15 @@ async fn prepared_frames_from_checkpoint(
             {
                 return Ok(None);
             }
+            // 抽帧参数变了就必须重抽：帧数相同不代表帧序列相同（同样数量可以由不同的
+            // 抽帧率与取整路径得到），而复用旧帧会让 timestamp_ms 按旧帧率被解释。
+            // 之前这里只比对帧数，档位里的抽帧率/保留比例改动可能被静默复用。
+            let current = SmartFrameSelection.create_plan(&video, &state.preset.preset());
+            if (current.sampling_fps - frames.sampling_fps).abs() > f64::EPSILON
+                || (current.retention_ratio - frames.retention_ratio).abs() > f64::EPSILON
+            {
+                return Ok(None);
+            }
             Ok(Some(PreparedFrames {
                 input_type: ProjectInputType::Video,
                 video: Some(video),
@@ -2554,7 +2563,7 @@ mod tests {
 
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 100,
             extracted_frames: Some(100),
             image_format: Some("jpeg".into()),
@@ -2577,7 +2586,7 @@ mod tests {
         let mut state = PipelineStateFile::created(Quality::Balanced);
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 100,
             extracted_frames: Some(100),
             image_format: Some("jpeg".into()),
@@ -2630,7 +2639,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 2,
             extracted_frames: Some(2),
             image_format: Some("jpeg".into()),
@@ -2651,6 +2660,58 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// 抽帧参数变了就必须重抽：帧数够也救不了——同样数量可以由不同抽帧率与取整路径得到，
+    /// 复用旧帧会让 `timestamp_ms` 按旧帧率被解释。这是 S1.3 参数化之后必须堵住的洞。
+    #[tokio::test]
+    async fn frame_checkpoint_is_invalidated_when_the_frame_plan_changes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::existing(uuid::Uuid::nil(), temporary.path().to_path_buf());
+        tokio::fs::create_dir_all(&paths.frames).await.unwrap();
+        tokio::fs::write(paths.frames.join("frame_000001.jpg"), b"one")
+            .await
+            .unwrap();
+        let mut state = PipelineStateFile::created(Quality::Balanced);
+        state.video = Some(VideoInfo {
+            duration: 1.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            total_frames: 30,
+            codec: "h264".into(),
+            rotation: 0,
+            pixel_format: "yuv420p".into(),
+            has_alpha: false,
+        });
+        state.frames = Some(FrameState {
+            retention_ratio: 0.5,
+            // Balanced@30fps 解析出的候选密度是 22.5；这里伪装成 15 模拟"档位改过抽帧率"。
+            sampling_fps: 15.0,
+            estimated_frames: 1,
+            extracted_frames: Some(1),
+            image_format: Some("jpeg".into()),
+            mask_count: Some(0),
+            has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
+        });
+        assert!(
+            prepared_frames_from_checkpoint(&paths, &state)
+                .await
+                .unwrap()
+                .is_none(),
+            "抽帧率与当前档位不符时不得复用旧帧"
+        );
+
+        // 对齐到当前档位解析出的值后，断点重新可用。
+        if let Some(frames) = state.frames.as_mut() {
+            frames.sampling_fps = 22.5;
+        }
+        assert!(prepared_frames_from_checkpoint(&paths, &state)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -2743,7 +2804,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("png".into()),
@@ -2795,7 +2856,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("jpeg".into()),
@@ -2998,7 +3059,7 @@ mod tests {
         let mut state = PipelineStateFile::created(Quality::Balanced);
         let plan = FramePlan {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 4,
         };
         state.frames = Some(FrameState {
@@ -3044,7 +3105,7 @@ mod tests {
         let config = state.preset.preset().smart_filter_config;
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 2,
             extracted_frames: Some(2),
             image_format: Some("jpeg".into()),
@@ -3091,7 +3152,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("jpeg".into()),
@@ -3129,7 +3190,7 @@ mod tests {
         let config = state.preset.preset().smart_filter_config;
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("png".into()),
@@ -3170,7 +3231,7 @@ mod tests {
         });
         state.frames = Some(FrameState {
             retention_ratio: 0.5,
-            sampling_fps: 15.0,
+            sampling_fps: 22.5,
             estimated_frames: 1,
             extracted_frames: Some(1),
             image_format: Some("jpeg".into()),

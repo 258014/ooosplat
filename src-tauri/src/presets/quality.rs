@@ -107,6 +107,16 @@ pub struct QualityPreset {
     pub sequential_overlap: u32,
     pub feature_max_image_size: u32,
     pub feature_max_num_features: u32,
+    /// 期望的**最终**保留密度（帧/秒）。`None` 表示沿用 `frame_retention_ratio × 源帧率`。
+    /// 它参与 L0 的三段式约束 `target_fps <= candidate_fps <= source_fps`，
+    /// 但**不直接**决定最终保留数——那仍由 `smart_filter_config` 的窗口配额决定。
+    pub target_fps: Option<f64>,
+    /// 送进智能筛选前的**候选**密度（帧/秒）。`None` 表示沿用
+    /// `target_fps × 1.5` 的超采样比例。
+    ///
+    /// 绝对帧率与比例的区别很重要：比例会随源帧率线性放大（60fps 源会抽到 27 帧/秒），
+    /// 绝对帧率则在任何源帧率下都给出同一个候选密度。
+    pub candidate_fps: Option<f64>,
 }
 
 impl Quality {
@@ -123,6 +133,9 @@ impl Quality {
                 sequential_overlap: 12,
                 feature_max_image_size: 1280,
                 feature_max_num_features: 8192,
+                // 沿用比例公式：候选 = target × 1.5，行为与 v2 一致。
+                target_fps: None,
+                candidate_fps: None,
             },
             Self::Balanced => QualityPreset {
                 frame_retention_ratio: 0.50,
@@ -141,6 +154,9 @@ impl Quality {
                 sequential_overlap: 15,
                 feature_max_image_size: 1600,
                 feature_max_num_features: 8192,
+                // 沿用比例公式：候选 = target × 1.5，行为与 v2 一致。
+                target_fps: None,
+                candidate_fps: None,
             },
             Self::High => QualityPreset {
                 frame_retention_ratio: 1.00,
@@ -154,6 +170,9 @@ impl Quality {
                 sequential_overlap: 20,
                 feature_max_image_size: 2000,
                 feature_max_num_features: 16384,
+                // 沿用比例公式：候选 = target × 1.5，行为与 v2 一致。
+                target_fps: None,
+                candidate_fps: None,
             },
         }
     }
@@ -209,6 +228,16 @@ mod tests {
             Quality::High.preset().smart_filter_config.keep_per_window,
             4
         );
+        // L0：三档默认都不指定绝对帧率（沿用 `retention_ratio × 1.5 × 源帧率`），
+        // 因此抽帧行为与 v2 一致；显式帧率只在标定后按档位开启。
+        for preset in [
+            Quality::Fast.preset(),
+            Quality::Balanced.preset(),
+            Quality::High.preset(),
+        ] {
+            assert_eq!(preset.target_fps, None);
+            assert_eq!(preset.candidate_fps, None);
+        }
     }
 
     #[test]
