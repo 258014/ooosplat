@@ -15,8 +15,8 @@ use super::image_sequence::is_image_file;
 /// 使下游与断点续跑能够判断已有的审计产物是否由同一套策略生成。
 /// v2：曝光改为「序列自适应门限 + 配额保底」，绝对阈值由 0.02 校准到 0.55，裁切判定改为 >=254 / <=1。
 /// v3：时序冗余筛选的参考帧改为「序列中最近一张**保留**帧」（跨窗口携带，不再在窗口边界重置），
-///     并新增 gray_diff / gradient_diff / motion_score 三项度量。两项新阈值默认不参与判定
-///     （`redundancy_metric` 默认 `LegacyGrayDiff`），标定完成后再切换。
+///     新增 gray_diff / gradient_diff / motion_score 三项度量，并把默认判定量切换为
+///     `DualThreshold`（依据：真实素材连续帧实测，近重复素材上旧量剔 39.5%、双门限剔 70.6%）。
 pub const FILTER_STRATEGY_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -45,7 +45,12 @@ pub struct FrameFilterConfig {
     /// `motion_score` 的灰度权重。仅用于审计汇总，不单独构成判定门。
     pub gray_diff_weight: f64,
     pub gradient_diff_weight: f64,
-    /// 冗余判定量的选择器。默认沿用 v2 的旧量，避免在阈值标定前改变筛选行为。
+    /// 冗余判定量的选择器，默认 `DualThreshold`（亮度归一化灰度差 + 梯度幅值差双门限）。
+    ///
+    /// 依据是真实素材**连续帧**实测：近重复素材上旧量（480px 未归一化平均绝对差）
+    /// 只剔掉 39.5% 的相邻重复对，双门限剔掉 70.6%——亮度有波动但结构未变的帧，
+    /// 旧量会当成新信息保留下来；高速环绕素材上两者几乎不动（0.0% vs 0.8%）。
+    /// 需要回到 v2 的判定语义时显式设为 `LegacyGrayDiff`。
     pub redundancy_metric: RedundancyMetric,
     /// 是否启用运动候选池：被模糊门拒下、但确有明显变化且清晰度仍可用的帧，
     /// 可以从**窗口配额内**争取名额（不额外增加保留帧总数）。
@@ -96,7 +101,7 @@ impl FrameFilterConfig {
             redundancy_gradient_threshold: 0.02,
             gray_diff_weight: 1.0,
             gradient_diff_weight: 1.0,
-            redundancy_metric: RedundancyMetric::LegacyGrayDiff,
+            redundancy_metric: RedundancyMetric::DualThreshold,
             enable_motion_candidates: false,
             motion_candidate_quota: 1,
             motion_candidate_min_quality_ratio: 0.6,
@@ -121,7 +126,7 @@ impl FrameFilterConfig {
             redundancy_gradient_threshold: 0.02,
             gray_diff_weight: 1.0,
             gradient_diff_weight: 1.0,
-            redundancy_metric: RedundancyMetric::LegacyGrayDiff,
+            redundancy_metric: RedundancyMetric::DualThreshold,
             enable_motion_candidates: false,
             motion_candidate_quota: 1,
             motion_candidate_min_quality_ratio: 0.6,
@@ -146,7 +151,7 @@ impl FrameFilterConfig {
             redundancy_gradient_threshold: 0.02,
             gray_diff_weight: 1.0,
             gradient_diff_weight: 1.0,
-            redundancy_metric: RedundancyMetric::LegacyGrayDiff,
+            redundancy_metric: RedundancyMetric::DualThreshold,
             enable_motion_candidates: false,
             motion_candidate_quota: 1,
             motion_candidate_min_quality_ratio: 0.6,
@@ -1806,20 +1811,21 @@ mod tests {
         }
     }
 
+    /// 默认判定量必须是 `DualThreshold`：旧量会把"亮度有波动、结构没变"的近重复帧
+    /// 当成新信息保留下来（实测近重复素材上两者剔除率 39.5% vs 70.6%）。
     #[test]
-    fn default_redundancy_metric_is_the_legacy_one() {
-        // 阈值标定完成前不允许改变默认筛选行为。
-        assert_eq!(
-            FrameFilterConfig::balanced().redundancy_metric,
-            RedundancyMetric::LegacyGrayDiff
-        );
+    fn default_redundancy_metric_is_the_dual_threshold() {
+        for preset in [
+            FrameFilterConfig::fast(),
+            FrameFilterConfig::balanced(),
+            FrameFilterConfig::high(),
+        ] {
+            assert_eq!(preset.redundancy_metric, RedundancyMetric::DualThreshold);
+        }
+        // 三档的判定量必须一致，否则同一份素材换个档位就会换一套冗余语义。
         assert_eq!(
             FrameFilterConfig::fast().redundancy_metric,
-            RedundancyMetric::LegacyGrayDiff
-        );
-        assert_eq!(
-            FrameFilterConfig::high().redundancy_metric,
-            RedundancyMetric::LegacyGrayDiff
+            FrameFilterConfig::high().redundancy_metric
         );
     }
 
