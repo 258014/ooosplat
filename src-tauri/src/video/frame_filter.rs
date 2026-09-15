@@ -2230,9 +2230,15 @@ mod tests {
         paths.sort_by_key(|path| natural_name(path));
         assert!(!paths.is_empty(), "目录中没有可用帧：{}", dir.display());
 
-        // 等距抽样，控制标定耗时且不受序列长度影响。
+        // 等距抽样，控制标定耗时且不受序列长度影响。设 OOOSPLAT_CALIBRATION_CONSECUTIVE=1
+        // 改为取**连续**帧：只有相邻帧之间的差异才能回答"当前生效的门限到底会不会触发"。
+        let consecutive = std::env::var("OOOSPLAT_CALIBRATION_CONSECUTIVE").is_ok();
         let sample = 120.min(paths.len());
-        let stride = paths.len().div_ceil(sample);
+        let stride = if consecutive {
+            1
+        } else {
+            paths.len().div_ceil(sample)
+        };
         let sampled = paths
             .iter()
             .step_by(stride)
@@ -2340,6 +2346,30 @@ mod tests {
             redundant_adaptive as f64 / pairs * 100.0,
             percentile(&gate_sorted, 0.50),
             percentile(&gate_sorted, 0.90),
+        );
+
+        // 当前**默认生效**的判定量：480px 未归一化平均绝对差，阈值 min_diff_score。
+        // 若真实相邻帧几乎都远高于它，"跨窗口参考"这类改动在实拍素材上就是零效果。
+        let legacy = frames
+            .windows(2)
+            .map(|pair| mean_absolute_difference(&pair[0].gray, &pair[1].gray))
+            .collect::<Vec<_>>();
+        let mut legacy_sorted = legacy.clone();
+        legacy_sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+        let below = legacy
+            .iter()
+            .filter(|value| **value < config.min_diff_score)
+            .count() as f64
+            / legacy.len().max(1) as f64
+            * 100.0;
+        println!(
+            "旧判定量 diff_score(480px MAE)：min={:.4} p10={:.4} p50={:.4} p90={:.4}；低于 min_diff_score={:.2} 的相邻对占比 {:.1}%",
+            legacy_sorted[0],
+            percentile(&legacy_sorted, 0.10),
+            percentile(&legacy_sorted, 0.50),
+            percentile(&legacy_sorted, 0.90),
+            config.min_diff_score,
+            below,
         );
     }
 }
