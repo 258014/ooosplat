@@ -18,7 +18,13 @@ use super::image_sequence::is_image_file;
 ///     新增 gray_diff / gradient_diff / motion_score 三项度量，默认判定量切换为 `DualThreshold`
 ///     （依据：真实素材连续帧实测，近重复素材上旧量剔 39.5%、双门限剔 70.6%），
 ///     并默认开启运动候选池（每窗最多补 1 张，从窗口配额内分配，不抬高总上界）。
-pub const FILTER_STRATEGY_VERSION: u32 = 3;
+/// v4：窗口配额内的淘汰规则由「按清晰度取前 N」改为「保序取最分散子集」
+///     （首帧锚点必留，其余用贪心最远点挑选）。同一密度下保留集内的相邻帧对
+///     占比从 64.1% 降到 20.8%，真实素材上增量 mapper 的注册率 82.4% → 100%。
+///     这一步改的是**挑选算法**而不是配置，因此必须靠版本号让旧检查点失效：
+///     `filter_config_hash` 只覆盖配置字段，不递增版本号的话，配置相同的旧项目
+///     会静默沿用旧的（按清晰度）保留集，永远拿不到这次修复。
+pub const FILTER_STRATEGY_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1772,8 +1778,8 @@ mod tests {
     }
 
     #[test]
-    fn strategy_version_is_three_and_enters_the_hash() {
-        assert_eq!(FILTER_STRATEGY_VERSION, 3);
+    fn strategy_version_is_four_and_enters_the_hash() {
+        assert_eq!(FILTER_STRATEGY_VERSION, 4);
         let hash = filter_config_hash(&config(), 20);
         assert!(hash.starts_with("fnv1a-"));
         // 版本或判定量变化必须改变哈希，否则旧缓存会被静默复用。
@@ -1954,14 +1960,15 @@ mod tests {
         );
 
         let summary = fs::read_to_string(output.path().join("filter_summary.json")).unwrap();
+        // 版本号用常量拼，避免递增策略版本时这里静默残留旧值。
         for key in [
-            "\"config\"",
-            "\"candidateFps\": 12.5",
-            "\"motionCandidates\": 0",
-            "\"adaptiveGrayThresholdP50\"",
-            "\"strategyVersion\": 3",
+            "\"config\"".to_string(),
+            "\"candidateFps\": 12.5".to_string(),
+            "\"motionCandidates\": 0".to_string(),
+            "\"adaptiveGrayThresholdP50\"".to_string(),
+            format!("\"strategyVersion\": {FILTER_STRATEGY_VERSION}"),
         ] {
-            assert!(summary.contains(key), "摘要缺少 {key}：{summary}");
+            assert!(summary.contains(&key), "摘要缺少 {key}：{summary}");
         }
     }
 
