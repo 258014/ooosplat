@@ -179,11 +179,16 @@ impl FrameFilterConfig {
 
 /// Expected number of frames the filter keeps out of `extracted` analysed frames.
 ///
-/// `decide_windows` splits the analysed frames into `window_size` chunks and keeps
-/// up to `keep_per_window` of each — backfilling to that quota, and always keeping
-/// at least one frame per window. The count is therefore predictable before the
-/// frames exist, which is what lets runtime estimates use the number of images
-/// COLMAP will actually process instead of the pre-filter extraction count.
+/// `decide_windows` splits the analysed frames into `window_size` chunks. Each window
+/// gets a quota, backfills to it, and always keeps at least one frame — so the **total**
+/// is predictable before the frames exist, which is what lets runtime estimates use the
+/// number of images COLMAP will actually process instead of the pre-filter extraction
+/// count.
+///
+/// v5 起配额按运动量在窗口之间**重新分配**（快运动窗多留、静止窗少留），因此单窗保留数
+/// 不再固定为上界 `keep_per_window`，但**总量**仍是这里算出的那个数——分配函数
+/// `allocate_window_quotas` 的需求口径就是本函数：整窗取 `keep_per_window`，末尾残窗取
+/// 剩余帧数。换句话说，实测里"实际保留数 = 本函数预测值"这件事在 v5 上比 v4 更准。
 ///
 /// The second-layer gap backfill can add a few frames when kept frames end up more
 /// than one window apart; once filtering has run, callers should prefer the real
