@@ -24,7 +24,12 @@ use super::image_sequence::is_image_file;
 ///     这一步改的是**挑选算法**而不是配置，因此必须靠版本号让旧检查点失效：
 ///     `filter_config_hash` 只覆盖配置字段，不递增版本号的话，配置相同的旧项目
 ///     会静默沿用旧的（按清晰度）保留集，永远拿不到这次修复。
-pub const FILTER_STRATEGY_VERSION: u32 = 4;
+/// v5：窗口配额按**运动量**重新分配（总量不变）——快运动窗口多留、几乎不动的窗口少留，
+///     权重取相邻分析帧的视图差异之和并按 `2 × 中位数` 截断离群段。依据：链条强度由
+///     最大的一跳决定，静止段多留的帧只是近重复，快运动段少留的帧会把链条直接扯断；
+///     实测中帧号等距把快速运动的尾部抽成"每两帧一次大跳"时，增量 mapper 从单模型
+///     198/198 退化成两块 188+11。
+pub const FILTER_STRATEGY_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -710,7 +715,10 @@ fn decide_windows(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
     // 自适应门限的观察窗口同样跨窗口累积：它描述的是"当前这段素材的运动尺度"。
     let mut recent_gray = RecentDiffs::new(config.adaptive_window_size);
     let mut recent_gradient = RecentDiffs::new(config.adaptive_window_size);
-    for window in frames.chunks_mut(config.window_size) {
+    // 每个窗口的配额按运动量重新分配（总量不变）：快运动段多留、静止段少留。
+    let quotas = allocate_window_quotas(frames, config);
+    for (window_index, window) in frames.chunks_mut(config.window_size).enumerate() {
+        let quota = quotas.get(window_index).copied().unwrap_or(0);
         // 1) 质量门。曝光先判：真正被裁切的帧应记 exposure，
         //    否则一张全白帧会因为均匀图拉普拉斯方差为 0 而被记成 blur，审计原因误导排查。
         for frame in window.iter_mut() {
@@ -776,7 +784,7 @@ fn decide_windows(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
         //     · 每个窗口最多补 `motion_candidate_quota` 张，且总数仍受窗口配额约束，
         //       所以保留帧数的上界与 v2 完全一致。
         //     候选之间也互相比对（参考推进到刚入选的候选），避免一段运动把名额占满近似重复的帧。
-        if config.enable_motion_candidates && qualified.len() < config.keep_per_window {
+        if config.enable_motion_candidates && qualified.len() < quota {
             let quality_floor = config.blur_threshold * config.motion_candidate_min_quality_ratio;
             let mut motion_reference = reference.as_ref().map(|previous| DiffReference {
                 gray: previous.gray.clone(),
@@ -785,8 +793,7 @@ fn decide_windows(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
             });
             let mut admitted = 0usize;
             for frame in window.iter_mut() {
-                if admitted >= config.motion_candidate_quota
-                    || qualified.len() + admitted >= config.keep_per_window
+                if admitted >= config.motion_candidate_quota || qualified.len() + admitted >= quota
                 {
                     break;
                 }
@@ -838,8 +845,8 @@ fn decide_windows(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
         // 3) 配额内按**间距**淘汰：同一窗口里把挨在一起的帧都留下，帧间基线太小，
         //    它们最容易在 mapper 里配不上（实测：帧更密的保留集注册率反而更低）。
         //    这里保序地取最分散的子集：首帧锚点必留，其余用贪心最远点挑选。
-        if qualified.len() > config.keep_per_window {
-            let subset = spread_subset(&qualified, config.keep_per_window);
+        if qualified.len() > quota {
+            let subset = spread_subset(&qualified, quota);
             for index in &qualified {
                 if !subset.contains(index) {
                     window[*index].metrics.kept = false;
@@ -852,8 +859,8 @@ fn decide_windows(frames: &mut [AnalyzedFrame], config: &FrameFilterConfig) {
         //    重建需要足够的视角覆盖，所以宁可多几帧近似重复，也不让窗口塌成「每窗一帧」。
         //    低细节帧（blur）不参与回填——无纹理帧补进来对匹配没有帮助，仍由第一层兜底保证至少一帧。
         let kept_now = window.iter().filter(|frame| frame.metrics.kept).count();
-        if kept_now < config.keep_per_window {
-            let mut deficit = config.keep_per_window - kept_now;
+        if kept_now < quota {
+            let mut deficit = quota - kept_now;
             let mut pool = (0..window.len())
                 .filter(|index| {
                     let frame = &window[*index];
@@ -927,6 +934,135 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
     } else {
         sorted[middle]
     }
+}
+
+/// 两帧之间的"视图差异"：直接复用冗余判定的两项度量（96px 灰度差 + 梯度差）加权和。
+///
+/// 这是"基线大小"的代理量，比帧号差更贴近 mapper 真正面对的东西：帧号差只在匀速运动时
+/// 才等价于视差。
+fn frame_view_difference(
+    left: &AnalyzedFrame,
+    right: &AnalyzedFrame,
+    config: &FrameFilterConfig,
+) -> f64 {
+    config.gray_diff_weight * normalized_gray_difference(&left.reduced, &right.reduced)
+        + config.gradient_diff_weight * gradient_difference(&left.gradient, &right.gradient)
+}
+
+/// 按窗口的**运动量**重新分配配额：快运动的窗口多留、几乎不动的窗口少留。
+///
+/// 依据：固定配额在快运动段和静止段给一样多的帧，而顺序匹配的链条强度由最大的一跳决定——
+/// 静止段多留的帧只是近重复（冗余门本来就会拦掉它们），快运动段少留的帧却会直接把链条
+/// 扯断。实测支撑：同一批候选帧上，帧号等距把快速运动的序列尾部抽成"每两帧一次大跳"，
+/// 增量 mapper 就从单模型 198/198 退化成两块 188+11。
+///
+/// 三条硬约束：
+/// · **总量不变**：分配需求与 `expected_kept_frames` 的口径一致，分配后总帧数不变（容量
+///   允许时），因此密度契约与运行时预估继续成立；
+/// · **只看与挑选结果无关的量**：运动量取相邻分析帧的视图差异之和（不依赖参考帧），容量取
+///   "清晰到可能被保留"的帧数——否则会与挑选结果互相依赖，无法确定；
+/// · **离群段截断**：单个闪光/黑场窗口的视图差异可能比常规大一个量级，权重按
+///   `2 × 中位数` 截断，避免它把配额全吸走。
+///
+/// 每个窗口的配额夹在 `1..=容量`；容量为 0 的窗口给 0（它本来就没有可用帧）。
+fn allocate_window_quotas(frames: &[AnalyzedFrame], config: &FrameFilterConfig) -> Vec<usize> {
+    let window_size = config.window_size.max(1);
+    let window_count = frames.len().div_ceil(window_size);
+    let mut weights = Vec::with_capacity(window_count);
+    let mut capacities = Vec::with_capacity(window_count);
+    let mut previous: Option<&AnalyzedFrame> = None;
+    for window in frames.chunks(window_size) {
+        let mut weight = 0.0;
+        // 跨窗口那一跳算进后一个窗口：它正是"进这个窗口就先来一大跳"的信号。
+        if let Some(previous) = previous {
+            weight += frame_view_difference(previous, &window[0], config);
+        }
+        for pair in window.windows(2) {
+            weight += frame_view_difference(&pair[0], &pair[1], config);
+        }
+        // 容量按"**可能被保留**"的口径算：清晰帧，加上启用运动候选时可被第 2b 步补进来的
+        // "模糊但仍有细节"的帧（下限是 blur_threshold × motion_candidate_min_quality_ratio）。
+        // 口径若只算清晰帧，整窗靠运动候选补位的窗口会被判成零容量，第 2b 步就永远进不去。
+        let floor = if config.enable_motion_candidates {
+            config.blur_threshold * config.motion_candidate_min_quality_ratio
+        } else {
+            config.blur_threshold
+        };
+        let capacity = window
+            .iter()
+            .filter(|frame| frame.metrics.laplacian_variance >= floor)
+            .count()
+            .min(window.len());
+        weights.push(weight);
+        capacities.push(capacity);
+        previous = window.last();
+    }
+    let demand = frames
+        .chunks(window_size)
+        .map(|window| config.keep_per_window.min(window.len()))
+        .collect::<Vec<_>>();
+    let budget = demand.iter().sum::<usize>();
+    if budget == 0 || window_count == 0 {
+        return vec![0; window_count];
+    }
+    let mut sorted = weights.clone();
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    let median = sorted[sorted.len() / 2];
+    let ceiling = if median > 0.0 { median * 2.0 } else { 0.0 };
+    let clamped = weights
+        .iter()
+        .map(|value| value.min(ceiling))
+        .collect::<Vec<_>>();
+    let total_weight = clamped.iter().sum::<f64>();
+    let floor_of = |capacity: usize| usize::from(capacity > 0);
+    let mut quotas = vec![0usize; window_count];
+    if total_weight <= 0.0 {
+        // 量不出运动（整段近似静止）：退化成平均分配，与旧行为一致。
+        for index in 0..window_count {
+            quotas[index] = demand[index].min(capacities[index]);
+        }
+        return quotas;
+    }
+    for index in 0..window_count {
+        let share = budget as f64 * clamped[index] / total_weight;
+        quotas[index] =
+            (share.round() as usize).clamp(floor_of(capacities[index]), capacities[index]);
+    }
+    // 抹平四舍五入的差：多了就从权重最小且还能减的窗口减，少了就给权重最大且还没满的窗口加。
+    let mut guard = budget.saturating_mul(2) + window_count;
+    while quotas.iter().sum::<usize>() > budget && guard > 0 {
+        guard -= 1;
+        let candidate = (0..window_count)
+            .filter(|index| quotas[*index] > floor_of(capacities[*index]))
+            .min_by(|left, right| {
+                clamped[*left]
+                    .partial_cmp(&clamped[*right])
+                    .unwrap_or(Ordering::Equal)
+                    .then(left.cmp(right))
+            });
+        match candidate {
+            Some(index) => quotas[index] -= 1,
+            None => break,
+        }
+    }
+    let mut guard = budget.saturating_mul(2) + window_count;
+    while quotas.iter().sum::<usize>() < budget && guard > 0 {
+        guard -= 1;
+        let candidate = (0..window_count)
+            .filter(|index| quotas[*index] < capacities[*index])
+            .max_by(|left, right| {
+                clamped[*left]
+                    .partial_cmp(&clamped[*right])
+                    .unwrap_or(Ordering::Equal)
+                    // 权重相同时取更靠前的窗口，结果确定。
+                    .then(right.cmp(left))
+            });
+        match candidate {
+            Some(index) => quotas[index] += 1,
+            None => break,
+        }
+    }
+    quotas
 }
 
 /// 在一组**升序**的候选下标里保序地取 `keep` 个"最分散"的：首帧锚点必留，
@@ -1362,10 +1498,25 @@ mod tests {
             save_png(input.path(), index, &normal_but_detailed(index));
         }
         let result = filter_frames(input.path(), output.path(), &config()).unwrap();
-        // 第一个窗口整窗被曝光门拦下，但帧本身细节充足：应回填到配额，而不是只留一帧。
+        // 第一个窗口整窗被曝光门拦下，但帧本身细节充足：应回填到**本窗口配额**，而不是只留一帧。
+        // 配额本身由 P3 按运动量分配（曝光段与正常段之间那一跳会被算进后一个窗口），
+        // 所以这里断言的是契约而不是固定数字：总量不变、回填量等于本窗口配额、其余仍是曝光拒。
         assert_eq!(result.kept_frames, 2 * config().keep_per_window);
-        assert_eq!(result.forced_keeps, config().keep_per_window);
-        assert_eq!(result.rejected_exposure, 10 - config().keep_per_window);
+        assert!(
+            result.forced_keeps >= 2,
+            "曝光窗要被回填到配额，而不是只留一帧：{}",
+            result.forced_keeps
+        );
+        assert!(
+            result.forced_keeps < 2 * config().keep_per_window,
+            "曝光窗不能把另一个窗口的帧也吃掉：{}",
+            result.forced_keeps
+        );
+        assert_eq!(
+            result.rejected_exposure + result.forced_keeps,
+            10,
+            "曝光门拒下的 10 帧里，只有本窗口配额的部分被回填"
+        );
     }
 
     #[test]
@@ -1782,8 +1933,8 @@ mod tests {
     }
 
     #[test]
-    fn strategy_version_is_four_and_enters_the_hash() {
-        assert_eq!(FILTER_STRATEGY_VERSION, 4);
+    fn strategy_version_is_five_and_enters_the_hash() {
+        assert_eq!(FILTER_STRATEGY_VERSION, 5);
         let hash = filter_config_hash(&config(), 20);
         assert!(hash.starts_with("fnv1a-"));
         // 版本或判定量变化必须改变哈希，否则旧缓存会被静默复用。
@@ -2456,6 +2607,72 @@ mod tests {
         // 均匀间隔的候选里，取 3 张就是首、中、尾。
         assert_eq!(spread_subset(&[0, 1, 2, 3, 4], 3), vec![0, 2, 4]);
     }
+    /// P3 的核心性质：配额随运动量倾斜，且**总量不变**。
+    ///
+    /// 构造两个窗口：第一个窗口的 10 帧图像完全相同（运动量 0），第二个窗口每帧变化 7 倍
+    /// （快运动）。总量必须仍等于 2 × 配额，但快运动窗口应当拿到更多帧。
+    #[test]
+    fn window_quotas_follow_motion_and_preserve_the_total() {
+        let mut frames = (0..10u32)
+            .map(|index| analyzed_with(&textured(0, false), index, 500.0))
+            .collect::<Vec<_>>();
+        frames.extend(
+            (0..10u32).map(|index| analyzed_with(&textured(index * 7, false), 10 + index, 500.0)),
+        );
+        let config = config();
+        let quotas = allocate_window_quotas(&frames, &config);
+
+        assert_eq!(quotas.len(), 2, "两个窗口：{quotas:?}");
+        assert_eq!(
+            quotas.iter().sum::<usize>(),
+            2 * config.keep_per_window,
+            "总量必须不变（密度契约）：{quotas:?}"
+        );
+        assert!(
+            quotas[1] > quotas[0],
+            "快运动窗口必须拿到比静止窗口更多的帧：{quotas:?}"
+        );
+        assert!(quotas[0] >= 1, "静止窗口也要至少留一帧：{quotas:?}");
+        assert!(
+            quotas[1] <= config.window_size,
+            "配额不得超过窗口本身：{quotas:?}"
+        );
+    }
+
+    /// 运动量均匀时，配额分配必须与旧行为一致（每窗恰好一个配额），避免无谓的行为漂移。
+    #[test]
+    fn window_quotas_match_the_uniform_config_when_motion_is_uniform() {
+        let frames = (0..30u32)
+            .map(|index| analyzed_with(&textured(index, false), index, 500.0))
+            .collect::<Vec<_>>();
+        let config = config();
+        let quotas = allocate_window_quotas(&frames, &config);
+        assert_eq!(quotas.len(), 3);
+        assert!(
+            quotas.iter().all(|quota| *quota == config.keep_per_window),
+            "均匀运动下每窗配额应与档位配置一致：{quotas:?}"
+        );
+    }
+
+    /// 容量为 0 的窗口（整窗都是模糊帧）不占配额，余量交给还能留帧的窗口。
+    #[test]
+    fn window_quotas_skip_windows_without_usable_frames() {
+        let mut frames = (0..10u32)
+            .map(|index| analyzed_with(&textured(index, false), index, 10.0))
+            .collect::<Vec<_>>();
+        frames.extend(
+            (0..10u32).map(|index| analyzed_with(&textured(index * 7, false), 10 + index, 500.0)),
+        );
+        let config = config();
+        let quotas = allocate_window_quotas(&frames, &config);
+        assert_eq!(quotas[0], 0, "整窗模糊、没有可用帧时不给配额：{quotas:?}");
+        assert_eq!(
+            quotas.iter().sum::<usize>(),
+            2 * config.keep_per_window,
+            "余量必须全给另一个窗口，总量不变：{quotas:?}"
+        );
+    }
+
     /// A/B 对照器械：按指定配置把一个目录真实过滤一次，并打印保留量。
     ///
     /// 环境变量：`OOOSPLAT_AB_IN`、`OOOSPLAT_AB_OUT`、`OOOSPLAT_AB_LEGACY=1`、
