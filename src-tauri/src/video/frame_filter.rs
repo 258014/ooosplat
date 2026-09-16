@@ -205,15 +205,34 @@ pub fn expected_kept_frames(extracted: u64, config: &FrameFilterConfig) -> u64 {
 
 /// Stable identity for the filtering inputs, including strategy semantics.
 ///
-/// 每一项会影响筛选结果的配置都必须出现在这里：只改参数而不让哈希变化，
-/// 旧项目的 filter 检查点就会被静默复用（`filter_checkpoint_complete` 只比对哈希）。
+/// 每一项会影响筛选结果的配置都必须出现在 `filter_config_payload` 里：只改参数而不让哈希
+/// 变化，旧项目的 filter 检查点就会被静默复用（`filter_checkpoint_complete` 只比对哈希）。
+/// **策略版本号也在载荷里**——它是"递增版本号就重跑既有项目"的唯一依据。
 pub fn filter_config_hash(config: &FrameFilterConfig, source_frames: u64) -> String {
+    let canonical = filter_config_payload(config, source_frames);
+    format!("fnv1a-{:016x}", fnv1a(canonical.as_bytes()))
+}
+
+/// FNV-1a（64 位），手写避免依赖 `DefaultHasher`：后者的算法不保证跨版本稳定，
+/// 而这里的哈希要写进项目状态、跨版本比对检查点。
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// 哈希的输入载荷，单独拆出来是为了让测试能逐字检查"版本号有没有在里头"——
+/// 只看摘要看不出这件事，而丢掉版本号的后果是所有既有项目静默沿用旧保留集。
+fn filter_config_payload(config: &FrameFilterConfig, source_frames: u64) -> String {
     // 枚举写成稳定字符串：用判别值会让枚举重排时哈希静默不变。
     let metric = match config.redundancy_metric {
         RedundancyMetric::LegacyGrayDiff => "legacy",
         RedundancyMetric::DualThreshold => "dual",
     };
-    let canonical = format!(
+    format!(
         "v={FILTER_STRATEGY_VERSION};source_frames={source_frames};blur={:.17};over={:.17};under={:.17};margin={:.17};window={};keep={};edge={};diff={:.17};dedge={};tgray={:.17};tgrad={:.17};gw={:.17};grw={:.17};metric={metric};mc={};mcq={};mcr={:.17};ad={};adw={};adf={:.17}",
         config.blur_threshold,
         config.overexposure_ratio,
@@ -234,13 +253,7 @@ pub fn filter_config_hash(config: &FrameFilterConfig, source_frames: u64) -> Str
         config.enable_adaptive_threshold,
         config.adaptive_window_size,
         config.adaptive_threshold_fraction,
-    );
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in canonical.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv1a-{hash:016x}")
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1946,6 +1959,29 @@ mod tests {
         let mut dual = config();
         dual.redundancy_metric = RedundancyMetric::DualThreshold;
         assert_ne!(hash, filter_config_hash(&dual, 20));
+        // 版本号必须**真的进哈希载荷**：这是"递增版本号就让旧项目重跑筛选"的唯一依据，
+        // 改哈希格式时若把 `v=` 丢掉，修复会在所有既有项目上静默失效而不报错。
+        assert!(
+            filter_config_payload(&config(), 20).contains(&format!("v={FILTER_STRATEGY_VERSION};")),
+            "哈希载荷里必须带策略版本号：{}",
+            filter_config_payload(&config(), 20)
+        );
+    }
+
+    /// 版本号进哈希 → 旧检查点失效：把"换个版本号哈希一定不同"钉死。
+    #[test]
+    fn a_different_strategy_version_cannot_reuse_the_same_checkpoint() {
+        let payload = filter_config_payload(&config(), 20);
+        let older = payload.replace(
+            &format!("v={FILTER_STRATEGY_VERSION};"),
+            &format!("v={};", FILTER_STRATEGY_VERSION - 1),
+        );
+        assert_ne!(payload, older, "载荷里没找到版本号标记，替换没生效");
+        assert_ne!(
+            filter_config_hash(&config(), 20),
+            format!("fnv1a-{:016x}", fnv1a(older.as_bytes())),
+            "换了版本号哈希却不变：旧项目的检查点会被复用，本次修复对既有项目不生效"
+        );
     }
 
     #[test]
