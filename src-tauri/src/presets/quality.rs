@@ -20,6 +20,65 @@ impl MapperPreference {
             _ => MapperBackend::Incremental,
         }
     }
+
+    /// Pick the mapper for a run of `frames` images.
+    ///
+    /// The global mapper's cost grows superlinearly with the number of observations
+    /// (images × features per image), and past a point its global positioning stage
+    /// does not finish at all. Measured on one 1920×1080 handheld clip with the Fast
+    /// tier parameters (1280px / 8192 features):
+    ///
+    /// | frames | incremental | global |
+    /// | --- | --- | --- |
+    /// | 299 | 349 s | 145 s, single model |
+    /// | 600 | 436 s, **12 fragments** (largest 23.3%) | 432 s, **single model 94.8%** |
+    /// | 1200 | 2697 s, 21 fragments | **> 68 min, never finished** |
+    /// | 2121 | 3049 s, 21 fragments | **> 58 min, cancelled by the user** |
+    ///
+    /// So below the threshold the global mapper is both faster and far better; above
+    /// it, the incremental mapper is the only one that returns at all (fragmented, but
+    /// usable). The threshold therefore scales with `feature_max_num_features`: a tier
+    /// that extracts twice the features per image produces twice the observations, so
+    /// it can afford roughly half the frames.
+    pub const fn backend_for_frames(
+        self,
+        global_available: bool,
+        frames: u64,
+        feature_max_num_features: u32,
+    ) -> MapperBackend {
+        match self {
+            Self::PreferGlobal
+                if global_available
+                    && frames <= global_mapper_frame_limit(feature_max_num_features) =>
+            {
+                MapperBackend::Global
+            }
+            _ => MapperBackend::Incremental,
+        }
+    }
+}
+
+/// Largest frame count for which the global mapper is still tried, for a tier that
+/// extracts `feature_max_num_features` features per image.
+///
+/// The reference point is 600 frames at 8192 features (measured to be the last size
+/// where the global mapper is the better choice on both axes). Framing it as a total
+/// observation budget keeps the two tiers that double the feature count honest.
+pub const fn global_mapper_frame_limit(feature_max_num_features: u32) -> u64 {
+    /// Observations the global mapper can still finish comfortably.
+    const OBSERVATION_BUDGET: u64 = 600 * 8192;
+    // `const fn` 里不能用 `.max()`（Ord 在常量上下文尚未稳定），手写等价判断。
+    let per_image = if feature_max_num_features < 1 {
+        1
+    } else {
+        feature_max_num_features as u64
+    };
+    let limit = OBSERVATION_BUDGET / per_image;
+    if limit < 1 {
+        1
+    } else {
+        limit
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -144,13 +203,13 @@ impl Quality {
                 brush_tuning: BrushTuning::brush_defaults(),
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::balanced(),
-                // The global mapper is being trialled on the Fast preset only.
-                // Measured on phone-orbit footage the incremental mapper
-                // registered 3/164 and 7/82 images where the global mapper
-                // registered 164/164 and 78/82, so this tier is expected to
-                // reconstruct worse and to fail outright on such material until
-                // the trial is widened to it.
-                mapper_backend: MapperPreference::ForceIncremental,
+                // 0.5.0 起三档统一用 global mapper。早期只在 Fast 试点，依据是手机环绕素材上
+                // 增量 mapper 只注册 3/164、7/82，而 global mapper 注册 164/164、78/82。
+                // 试点铺开的依据：选帧已换成"按运动量重新分配窗口配额"的那一版，
+                // 同一段素材上增量 mapper 现在也能全量注册（Fast 档重复三次均为单模型）。
+                // 注意 `PreferGlobal` 在断点续跑里接受任何已记录的 backend，所以既有项目
+                // 不会被强制改用 global；新项目与重新生成的才走 global。
+                mapper_backend: MapperPreference::PreferGlobal,
                 sequential_overlap: 15,
                 feature_max_image_size: 1600,
                 feature_max_num_features: 8192,
@@ -165,8 +224,9 @@ impl Quality {
                 brush_tuning: BrushTuning::high_detail(),
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::high(),
-                // Same trial scope as Balanced: see the note there.
-                mapper_backend: MapperPreference::ForceIncremental,
+                // Same choice as Balanced: every tier prefers the global mapper since 0.5.0;
+                // see the note there.
+                mapper_backend: MapperPreference::PreferGlobal,
                 sequential_overlap: 20,
                 feature_max_image_size: 2000,
                 feature_max_num_features: 16384,
@@ -281,22 +341,61 @@ mod tests {
         }
     }
 
+    /// 按帧数切 mapper：小规模用 global，超规模退回增量。
+    ///
+    /// 依据（本机实测，Fast 参数）：299 帧 global 145 s 单模型；600 帧 global 432 s 单模型
+    /// 94.8%（增量同期碎成 12 块、最大 23.3%）；1200 帧 global >68 分钟未完成（增量 45 分钟
+    /// 跑完）；2121 帧 global >58 分钟被取消（增量 51 分钟跑完）。
     #[test]
-    fn only_the_fast_preset_trials_the_global_mapper() {
-        // The global mapper is deliberately trialled on one preset first, so a
-        // change that widens or narrows that scope has to be intentional.
+    fn mapper_backend_switches_by_frame_count() {
+        let global_available = true;
+        // 8192 特征：600 帧以内用 global。
+        for frames in [1_u64, 163, 299, 600] {
+            assert_eq!(
+                MapperPreference::PreferGlobal.backend_for_frames(global_available, frames, 8192),
+                MapperBackend::Global,
+                "{frames} 帧应使用 global mapper"
+            );
+        }
+        for frames in [601_u64, 1200, 2121] {
+            assert_eq!(
+                MapperPreference::PreferGlobal.backend_for_frames(global_available, frames, 8192),
+                MapperBackend::Incremental,
+                "{frames} 帧应退回 incremental mapper"
+            );
+        }
+
+        // 特征数翻倍的档位观测数也翻倍，可承受帧数减半。
+        assert_eq!(global_mapper_frame_limit(8192), 600);
+        assert_eq!(global_mapper_frame_limit(16_384), 300);
         assert_eq!(
-            Quality::Fast.preset().mapper_backend,
-            MapperPreference::PreferGlobal
+            MapperPreference::PreferGlobal.backend_for_frames(global_available, 400, 16_384),
+            MapperBackend::Incremental,
+            "16384 特征档位在 400 帧就应退回增量"
+        );
+
+        // 引擎没有 global mapper 时无条件退回增量；ForceIncremental 永远不回 global。
+        assert_eq!(
+            MapperPreference::PreferGlobal.backend_for_frames(false, 100, 8192),
+            MapperBackend::Incremental
         );
         assert_eq!(
-            Quality::Balanced.preset().mapper_backend,
-            MapperPreference::ForceIncremental
+            MapperPreference::ForceIncremental.backend_for_frames(true, 100, 8192),
+            MapperBackend::Incremental
         );
-        assert_eq!(
-            Quality::High.preset().mapper_backend,
-            MapperPreference::ForceIncremental
-        );
+    }
+
+    #[test]
+    fn every_preset_prefers_the_global_mapper() {
+        // 0.5.0 起三档统一用 global mapper。这条测试是刻意的"改动必须是有意的"闸门：
+        // 早期只在 Fast 试点，后来按实测铺开到全部档位，将来若再收窄也必须先改这里。
+        for quality in [Quality::Fast, Quality::Balanced, Quality::High] {
+            assert_eq!(
+                quality.preset().mapper_backend,
+                MapperPreference::PreferGlobal,
+                "{quality:?} 应与其他档位一致地优先使用 global mapper"
+            );
+        }
 
         // The preference must still degrade safely when the engine has no global
         // mapper at all.
