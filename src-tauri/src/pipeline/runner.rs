@@ -4,13 +4,43 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
 use serde::Serialize;
 
 const GLOBAL_MAPPER_MIN_REGISTERED_RATIO: f64 = 0.60;
+
+/// global mapper 的时间预算下限：小素材也要给足余量，避免误杀。
+const GLOBAL_MAPPER_MIN_BUDGET: Duration = Duration::from_secs(600);
+
+/// global mapper 每帧的时间预算。
+///
+/// 依据（同一段手持素材、Fast 参数、1280px / 8192 特征、本机实测）：
+/// 299 帧 145 s（0.48 s/帧）、600 帧 432 s（0.72 s/帧）、1200 帧 >68 分钟未完成。
+/// 取 1.5 s/帧 是"正常工作量的两倍以上"，只有真正退化的运行才会撞到它。
+const GLOBAL_MAPPER_BUDGET_PER_FRAME: f64 = 1.5;
+
+/// global mapper 的时间预算：`max(下限, 帧数 × 每帧预算)`。
+fn global_mapper_budget(frames: u64) -> Duration {
+    let scaled = Duration::from_secs_f64(frames as f64 * GLOBAL_MAPPER_BUDGET_PER_FRAME);
+    scaled.max(GLOBAL_MAPPER_MIN_BUDGET)
+}
+
+/// 把预算格式化成"X 分 Y 秒"，用于给用户看的事件消息。
+fn format_wait_budget(budget: Duration) -> String {
+    let total = budget.as_secs();
+    let minutes = total / 60;
+    let seconds = total % 60;
+    if minutes == 0 {
+        format!("{seconds} 秒")
+    } else if seconds == 0 {
+        format!("{minutes} 分钟")
+    } else {
+        format!("{minutes} 分 {seconds} 秒")
+    }
+}
 
 fn mapper_backend_label(backend: crate::engines::MapperBackend) -> &'static str {
     match backend {
@@ -1063,7 +1093,37 @@ impl PipelineRunner {
             let preference = quality.preset().mapper_backend;
             let global_available =
                 colmap::supports_global_mapper(&self.engines.colmap, &self.process_manager).await;
-            let preferred_backend = preference.backend(global_available);
+            // 按帧数权衡：小规模上 global 又快又好，大规模上它会卡在全局定位不返回
+            // （实测 1200 帧 >68 分钟未完成、2121 帧 >58 分钟被取消），此时增量 mapper
+            // 虽然会碎成多块，但至少能在几十分钟内跑完。
+            let preferred_backend = preference.backend_for_frames(
+                global_available,
+                frame_count,
+                quality.preset().feature_max_num_features,
+            );
+            if preference == crate::presets::MapperPreference::PreferGlobal
+                && preferred_backend == colmap::MapperBackend::Incremental
+                && global_available
+            {
+                self.events.send(
+                    PipelineStage::Reconstructing,
+                    Some(PipelineEngine::Colmap),
+                    EventKind::Log,
+                    EventLevel::Info,
+                    Some(0.0),
+                    false,
+                    format!(
+                        "{frame_count} 帧超过 global mapper 的规模上限（{} 帧，按每帧 {} 个特征折算），改用 Incremental Mapper",
+                        crate::presets::global_mapper_frame_limit(
+                            quality.preset().feature_max_num_features
+                        ),
+                        quality.preset().feature_max_num_features,
+                    ),
+                    None,
+                    None,
+                    None,
+                );
+            }
             let mut selected_backend = preferred_backend;
             let started = Instant::now();
             reset_directory(&sparse).await?;
@@ -1115,22 +1175,53 @@ impl PipelineRunner {
                         ),
                     }
                 }
-                let global_result = colmap::map_with_backend(
-                    colmap::MapperBackend::Global,
-                    &self.engines.colmap,
-                    &database,
-                    colmap_images,
-                    &sparse,
-                    colmap_log.clone(),
-                    &self.process_manager,
-                    Some(self.process_observer(
-                        PipelineStage::Reconstructing,
-                        PipelineEngine::Colmap,
-                        Some(frame_count),
-                        ObserverMode::Mapper,
-                    )),
-                )
-                .await;
+                // 给 global mapper 一个时间预算：它的全局定位阶段会随观测数超线性增长，
+                // 长序列上可能出现"既不失败也不返回"的情况（实测 2121 帧 >58 分钟仍未完成、
+                // 1200 帧 >68 分钟仍在跑）。没有预算时用户只能手动取消，白等几十分钟。
+                // 用**子令牌**单独取消这一次调用，取消后仍能回退增量 mapper。
+                let global_budget = global_mapper_budget(frame_count);
+                let global_token = self.process_manager.child_token();
+                let global_result = tokio::select! {
+                    result = colmap::map_with_backend(
+                        colmap::MapperBackend::Global,
+                        &self.engines.colmap,
+                        &database,
+                        colmap_images,
+                        &sparse,
+                        colmap_log.clone(),
+                        &self.process_manager,
+                        Some(self.process_observer(
+                            PipelineStage::Reconstructing,
+                            PipelineEngine::Colmap,
+                            Some(frame_count),
+                            ObserverMode::Mapper,
+                        )),
+                        Some(global_token.clone()),
+                    ) => result,
+                    _ = tokio::time::sleep(global_budget) => {
+                        global_token.cancel();
+                        self.events.send(
+                            PipelineStage::Reconstructing,
+                            Some(PipelineEngine::Colmap),
+                            EventKind::Log,
+                            EventLevel::Warning,
+                            Some(0.2),
+                            false,
+                            format!(
+                                "Global Mapper 超过时间预算 {}（{} 帧），已终止并回退 Incremental",
+                                format_wait_budget(global_budget),
+                                frame_count
+                            ),
+                            None,
+                            None,
+                            None,
+                        );
+                        // 等被取消的进程真正退出，避免它与随后的增量 mapper 抢 CPU。
+                        Err(crate::error::SplatError::Process(
+                            "global mapper 超时".into(),
+                        ))
+                    }
+                };
                 let global_succeeded = global_result.is_ok();
                 let global_quality = if global_result.is_ok() {
                     best_sparse_model(frame_input, &sparse).await.ok()
@@ -1174,6 +1265,7 @@ impl PipelineRunner {
                             Some(frame_count),
                             ObserverMode::Mapper,
                         )),
+                        None,
                     )
                     .await?;
                 }
@@ -1192,6 +1284,7 @@ impl PipelineRunner {
                         Some(frame_count),
                         ObserverMode::Mapper,
                     )),
+                    None,
                 )
                 .await?;
             }

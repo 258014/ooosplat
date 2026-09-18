@@ -5,6 +5,8 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     error::{Result, SplatError},
     process::{ProcessManager, ProcessObserver, ProcessSpec},
@@ -299,15 +301,19 @@ async fn run_colmap(
     log_path: PathBuf,
     manager: &ProcessManager,
     observer: Option<ProcessObserver>,
+    cancellation: Option<CancellationToken>,
 ) -> Result<()> {
     let output = manager
-        .run(ProcessSpec {
-            executable: executable.to_path_buf(),
-            args,
-            working_directory: Some(working_directory.to_path_buf()),
-            log_path: Some(log_path),
-            observer,
-        })
+        .run_with_cancellation(
+            ProcessSpec {
+                executable: executable.to_path_buf(),
+                args,
+                working_directory: Some(working_directory.to_path_buf()),
+                log_path: Some(log_path),
+                observer,
+            },
+            cancellation,
+        )
         .await?;
     if output.success {
         Ok(())
@@ -345,6 +351,7 @@ pub async fn extract_features(
         log,
         manager,
         observer,
+        None,
     )
     .await
 }
@@ -366,6 +373,7 @@ pub async fn match_sequential(
         log,
         manager,
         observer,
+        None,
     )
     .await
 }
@@ -386,6 +394,7 @@ pub async fn match_exhaustive(
         log,
         manager,
         observer,
+        None,
     )
     .await
 }
@@ -519,6 +528,7 @@ pub async fn calibrate_view_graph(
         log,
         manager,
         observer,
+        None,
     )
     .await
 }
@@ -541,6 +551,7 @@ pub async fn map(
         log,
         manager,
         observer,
+        None,
     )
     .await
 }
@@ -555,6 +566,9 @@ pub async fn map_with_backend(
     log: PathBuf,
     manager: &ProcessManager,
     observer: Option<ProcessObserver>,
+    // Optional per-call token so a caller can give up on **this** mapper run alone
+    // (e.g. a time budget) and still fall back to another backend afterwards.
+    cancellation: Option<CancellationToken>,
 ) -> Result<()> {
     tokio::fs::create_dir_all(output).await?;
     run_colmap(
@@ -572,6 +586,7 @@ pub async fn map_with_backend(
         log,
         manager,
         observer,
+        cancellation,
     )
     .await
 }
