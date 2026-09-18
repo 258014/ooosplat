@@ -15,7 +15,6 @@ import { useApp, useSplat } from "@playcanvas/react/hooks";
 import {
   ADDRESS_CLAMP_TO_EDGE,
   BoundingBox,
-  DEVICETYPE_WEBGL2,
   Entity as PcEntity,
   FILTER_LINEAR,
   GAMMA_SRGB,
@@ -33,7 +32,6 @@ import {
   WORKBUFFER_UPDATE_ONCE,
   type Application as PcApplication,
   type CameraComponent,
-  type WebglGraphicsDevice,
 } from "playcanvas";
 import {
   ArrowLeft,
@@ -83,11 +81,12 @@ import type {
 } from "../../types/pipeline";
 import { PLY_TO_ENGINE_ROTATION } from "./CoordinateSystem";
 import {
-  copyFlippedRgbaRows,
+  copyRgbaReadbackRows,
   normalizedCaptureRegion,
   verticalFovForCapture,
   type NormalizedCaptureRegion,
 } from "./PreviewCapture";
+import { previewDeviceTypes } from "./PreviewBackend";
 import {
   GAUSSIAN_VIDEO_FRAME_COUNT,
   GAUSSIAN_VIDEO_HEIGHT,
@@ -106,6 +105,7 @@ import {
   ORBIT_DEGREES_PER_SECOND,
   ORBIT_START_SECONDS,
   PREVIEW_ANIMATION_GLSL,
+  PREVIEW_ANIMATION_WGSL,
   animationEffectsActive,
   animationPhaseAt,
   orbitDegreesAt,
@@ -135,6 +135,7 @@ interface SplatSceneApi {
   replay: () => void;
   selectRectangle: (rectangle: SelectionRectangle, selectionMode: RectangleSelectionMode) => Promise<Uint8Array>;
   freezeCrop: (crop: Exclude<GaussianCrop, null>, deletedMask: Uint8Array) => Promise<Uint8Array>;
+  deactivateCrop: () => void;
   alignView: (view: GaussianOrthographicView) => void;
   initializeCrop: (kind: "sphere" | "box", previous: GaussianCrop) => Exclude<GaussianCrop, null> | null;
   exportVideo: (options: {
@@ -269,6 +270,7 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
   const editorStateRef = useRef({ crop, mode, tool, deletedMask, selectionMask });
   editorStateRef.current = { crop, mode, tool, deletedMask, selectionMask };
   app.scene.gsplatCentersEnabled = true;
+  app.scene.gsplat.colorUpdateAngle = 0;
   const { asset, loading, error, subscribe } = useSplat(assetUrl, EDITABLE_SPLAT_ASSET_OPTIONS);
   const preparedAsset = useMemo(() => {
     if (!asset) return null;
@@ -347,8 +349,7 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
 
   useEffect(() => {
     const canvas = app.graphicsDevice.canvas;
-    const handleContextLost = (event: Event) => {
-      event.preventDefault();
+    const reportDeviceLost = () => {
       if (contextLostRef.current || appDestroyedRef.current) return;
       contextLostRef.current = true;
       if (controlsRef.current) controlsRef.current.enabled = false;
@@ -360,8 +361,16 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
         renderer,
       });
     };
-    canvas.addEventListener("webglcontextlost", handleContextLost);
-    return () => canvas.removeEventListener("webglcontextlost", handleContextLost);
+    const handleWebglContextLost = (event: Event) => {
+      event.preventDefault();
+      reportDeviceLost();
+    };
+    const deviceLostHandle = app.graphicsDevice.on("devicelost", reportDeviceLost);
+    canvas.addEventListener("webglcontextlost", handleWebglContextLost);
+    return () => {
+      deviceLostHandle.off();
+      canvas.removeEventListener("webglcontextlost", handleWebglContextLost);
+    };
   }, [app, onOrthographicViewChange, onStatus, renderer]);
 
   const applyEditorUniforms = useCallback(() => {
@@ -535,7 +544,7 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
     animationComponentRef.current = component;
     animationEffectActiveRef.current = false;
     robustLocalBoundsRef.current = null;
-    component.setWorkBufferModifier({ glsl: PREVIEW_ANIMATION_GLSL });
+    component.setWorkBufferModifier({ glsl: PREVIEW_ANIMATION_GLSL, wgsl: PREVIEW_ANIMATION_WGSL });
     component.workBufferUpdate = WORKBUFFER_UPDATE_AUTO;
     component.setParameter("uOoosplatAnimationEnabled", 0);
     component.setParameter("uOoosplatAnimationTime", 0);
@@ -659,7 +668,7 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
     if (!controls || !cameraEntity?.camera) throw new Error(t("viewer.cameraNotReady"));
     if (exportingRef.current) throw new Error(t("video.exportBusy"));
 
-    const graphicsDevice = app.graphicsDevice as WebglGraphicsDevice;
+    const graphicsDevice = app.graphicsDevice;
     if (graphicsDevice.maxTextureSize < Math.max(GAUSSIAN_VIDEO_WIDTH, GAUSSIAN_VIDEO_HEIGHT)) {
       throw new Error(t("video.textureCapacity", { maximum: graphicsDevice.maxTextureSize }));
     }
@@ -717,23 +726,21 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
           await waitForSplatFrame(app, cameraEntity.camera!, signal);
           await nextAnimationFrame(signal);
           app.render();
-          graphicsDevice.setRenderTarget(videoRenderTarget);
-          graphicsDevice.updateBegin();
-          await graphicsDevice.readPixelsAsync(
+          const pixels = await videoTexture.read(
             0,
             0,
             GAUSSIAN_VIDEO_WIDTH,
             GAUSSIAN_VIDEO_HEIGHT,
-            readbackPixels,
-            true,
+            { data: readbackPixels, immediate: true, renderTarget: videoRenderTarget },
           );
           signal.throwIfAborted();
           frameImageData ??= context.createImageData(GAUSSIAN_VIDEO_WIDTH, GAUSSIAN_VIDEO_HEIGHT);
-          copyFlippedRgbaRows(
-            readbackPixels,
+          copyRgbaReadbackRows(
+            pixels as Uint8Array,
             frameImageData.data,
             GAUSSIAN_VIDEO_WIDTH,
             GAUSSIAN_VIDEO_HEIGHT,
+            graphicsDevice.isWebGL2,
           );
           context.putImageData(frameImageData, 0, 0);
         },
@@ -769,6 +776,20 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
     return selection.freezeCrop(currentCrop, currentDeletedMask);
   }, []);
 
+  const deactivateCrop = useCallback(() => {
+    const component = animationComponentRef.current;
+    if (!component || appDestroyedRef.current) return;
+    editorStateRef.current = { ...editorStateRef.current, crop: null, tool: "transform" };
+    component.setParameter("uOoosplatCropKind", 0);
+    component.setParameter("uOoosplatCropCenter", [0, 0, 0]);
+    component.setParameter("uOoosplatCropSize", [1, 1, 1]);
+    component.setParameter("uOoosplatCropRadius", 1);
+    component.workBufferUpdate = WORKBUFFER_UPDATE_ONCE;
+    cropOutlineRef.current?.setCrop(null);
+    cropOutlineRef.current?.setVisible(false);
+    app.renderNextFrame = true;
+  }, [app]);
+
   const cropBounds = useCallback(() => {
     const current = editorStateRef.current.crop;
     if (!current) return transformedModelBounds();
@@ -800,7 +821,7 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
       : { kind, center, size };
   }, [transformedModelBounds]);
 
-  useImperativeHandle(ref, () => ({ replay, exportVideo, selectRectangle, freezeCrop, alignView, initializeCrop }), [alignView, exportVideo, freezeCrop, initializeCrop, replay, selectRectangle]);
+  useImperativeHandle(ref, () => ({ replay, exportVideo, selectRectangle, freezeCrop, deactivateCrop, alignView, initializeCrop }), [alignView, deactivateCrop, exportVideo, freezeCrop, initializeCrop, replay, selectRectangle]);
 
   return <>
     <PreviewCamera ref={cameraRef} />
@@ -1210,19 +1231,28 @@ export function GaussianViewer({ previewSessionId, onExit, onDisposed, pipelineR
   };
 
   const enableCrop = (kind: "sphere" | "box", view: GaussianOrthographicView = orthographicView ?? "side") => {
-    const crop = sceneApiRef.current?.initializeCrop(kind, store.editing.crop);
-    if (crop && JSON.stringify(crop) !== JSON.stringify(store.editing.crop)) {
-      store.beginCropTransaction();
-      store.setCropLive(crop);
-      store.commitCropTransaction();
+    const current = useGaussianTransformStore.getState();
+    const crop = sceneApiRef.current?.initializeCrop(kind, current.editing.crop);
+    if (crop && JSON.stringify(crop) !== JSON.stringify(current.editing.crop)) {
+      current.beginCropTransaction();
+      current.setCropLive(crop);
+      current.commitCropTransaction();
     }
     requestAnimationFrame(() => sceneApiRef.current?.alignView(view));
+  };
+
+  const activateTool = (tool: GaussianEditorTool) => {
+    if (tool === "sphere" || tool === "box") {
+      setOrthographicView("side");
+      enableCrop(tool, "side");
+    }
+    useGaussianTransformStore.getState().setTool(tool);
   };
 
   const switchTool = async (tool: GaussianEditorTool) => {
     if (busy || tool === store.tool) return;
     const current = useGaussianTransformStore.getState();
-    if (tool === "transform" && (current.tool === "sphere" || current.tool === "box") && current.editing.crop) {
+    if ((current.tool === "sphere" || current.tool === "box") && current.editing.crop) {
       current.commitCropTransaction();
       const latest = useGaussianTransformStore.getState();
       const crop = latest.editing.crop;
@@ -1232,6 +1262,8 @@ export function GaussianViewer({ previewSessionId, onExit, onDisposed, pipelineR
       try {
         const deletedMask = await sceneApiRef.current.freezeCrop(crop, latest.deletedMask);
         useGaussianTransformStore.getState().commitCropFreeze(crop, deletedMask);
+        sceneApiRef.current.deactivateCrop();
+        activateTool(tool);
       } catch (error) {
         setCropFreezeError(error instanceof Error ? error.message : String(error));
       } finally {
@@ -1239,11 +1271,7 @@ export function GaussianViewer({ previewSessionId, onExit, onDisposed, pipelineR
       }
       return;
     }
-    if (tool === "sphere" || tool === "box") {
-      setOrthographicView("side");
-      enableCrop(tool, "side");
-    }
-    store.setTool(tool);
+    activateTool(tool);
   };
 
   const alignView = (view: GaussianOrthographicView) => {
@@ -1380,7 +1408,7 @@ export function GaussianViewer({ previewSessionId, onExit, onDisposed, pipelineR
     {pipelineRunning && <div className="preview-resource-note">{t("viewer.resourceNote")}</div>}
     <div className="preview-editor">
       <div className={`gaussian-viewport tool-${store.tool}`} onPointerDownCapture={rectanglePointerDown} onPointerMoveCapture={rectanglePointerMove} onPointerUpCapture={rectanglePointerEnd} onPointerCancelCapture={rectanglePointerEnd}>
-        <Application key={`${store.descriptor.projectId}-${rendererRevision}`} className="gaussian-canvas" deviceTypes={[DEVICETYPE_WEBGL2]} graphicsDeviceOptions={{ antialias: false, alpha: false, preserveDrawingBuffer: true, powerPreference: "high-performance" }}>
+        <Application key={`${store.descriptor.projectId}-${rendererRevision}`} className="gaussian-canvas" deviceTypes={previewDeviceTypes()} graphicsDeviceOptions={{ antialias: false, alpha: false, preserveDrawingBuffer: true, powerPreference: "high-performance" }}>
           <SplatScene ref={sceneApiRef} assetUrl={previewAssetUrl} splatCount={store.descriptor.splatCount} transform={store.transform} mode={mode} tool={store.tool} crop={store.editing.crop} deletedMask={store.deletedMask} selectionMask={store.selectionMask} onOrthographicViewChange={setOrthographicView} onStatus={onStatus} onAnimationStatus={onAnimationStatus} />
         </Application>
         {mode === "preview" && <div ref={captureGuideRef} className="portrait-capture-guide" aria-hidden="true">

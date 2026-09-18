@@ -115,6 +115,28 @@ describe("GaussianTransformStore", () => {
     expect(state.deletedMask).toEqual(frozen);
   });
 
+  it("keeps prior frozen deletions when another crop tool starts editing", () => {
+    loadProject();
+    const firstCrop: Exclude<GaussianCrop, null> = { kind: "sphere", center: [0, 0, 0], radius: 4 };
+    useGaussianTransformStore.getState().setTool("sphere");
+    useGaussianTransformStore.getState().setCropLive(firstCrop);
+    const firstFrozen = new Uint8Array(2);
+    setMaskBit(firstFrozen, 2, true);
+    useGaussianTransformStore.getState().commitCropFreeze(firstCrop, firstFrozen);
+
+    const secondCrop: Exclude<GaussianCrop, null> = { kind: "box", center: [1, 2, 3], size: [4, 5, 6] };
+    useGaussianTransformStore.getState().setTool("box");
+    useGaussianTransformStore.getState().setCropLive(secondCrop);
+    const secondFrozen = firstFrozen.slice();
+    setMaskBit(secondFrozen, 7, true);
+    useGaussianTransformStore.getState().commitCropFreeze(secondCrop, secondFrozen);
+
+    const state = useGaussianTransformStore.getState();
+    expect(maskBit(state.deletedMask, 2)).toBe(true);
+    expect(maskBit(state.deletedMask, 7)).toBe(true);
+    expect(state.editing.deletedCount).toBe(2);
+  });
+
   it("resets transforms, crop, deletion and history to the original final.ply state", () => {
     loadProject();
     const store = useGaussianTransformStore.getState();

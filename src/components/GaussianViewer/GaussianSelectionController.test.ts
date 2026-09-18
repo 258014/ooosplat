@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { combineDeletedMasks, combineSelectionMasks, packSelectionTextureData } from "./GaussianSelectionController";
+import {
+  PROCESS_SELECTION_GLSL,
+  PROCESS_SELECTION_WGSL,
+  combineDeletedMasks,
+  combineSelectionMasks,
+  packSelectionTextureData,
+} from "./GaussianSelectionController";
 
-const processorState = vi.hoisted(() => ({ hits: [] as Uint8Array[] }));
+const processorState = vi.hoisted(() => ({ hits: [] as Uint8Array[], options: [] as Array<Record<string, string>> }));
 
 vi.mock("playcanvas", () => ({
   WORKBUFFER_UPDATE_ONCE: "once",
@@ -11,8 +17,9 @@ vi.mock("playcanvas", () => ({
   },
   GSplatProcessor: class {
     private readonly component: { getInstanceTexture: (name: string) => { data: Uint8Array } };
-    constructor(_device: unknown, _source: unknown, destination: { component: { getInstanceTexture: (name: string) => { data: Uint8Array } } }) {
+    constructor(_device: unknown, _source: unknown, destination: { component: { getInstanceTexture: (name: string) => { data: Uint8Array } } }, options: Record<string, string>) {
       this.component = destination.component;
+      processorState.options.push(options);
     }
     setParameter() {}
     process() {
@@ -39,6 +46,12 @@ function createTexture(size = 8) {
 }
 
 describe("GaussianSelectionController mask helpers", () => {
+  it("provides equivalent selection processors for WebGL2 and WebGPU", () => {
+    expect(PROCESS_SELECTION_GLSL).toContain("void process()");
+    expect(PROCESS_SELECTION_WGSL).toContain("fn process()");
+    expect(PROCESS_SELECTION_WGSL).toContain("writeOoosplatScratch");
+  });
+
   it("packs only splats inside the valid source range", () => {
     const pixels = new Uint8Array([255, 0, 128, 127, 255, 0, 0, 0, 255]);
     expect([...packSelectionTextureData(pixels, 5)]).toEqual([0b00010101]);
@@ -80,6 +93,10 @@ describe("GaussianSelectionController mask helpers", () => {
       8,
       requestRender,
     );
+    expect(processorState.options.at(-1)).toMatchObject({
+      processGLSL: PROCESS_SELECTION_GLSL,
+      processWGSL: PROCESS_SELECTION_WGSL,
+    });
     const rectangle = { minX: -1, minY: -1, maxX: 1, maxY: 1 };
     const selections = [
       new Uint8Array([255, 0, 0, 0, 0, 0, 0, 0]),

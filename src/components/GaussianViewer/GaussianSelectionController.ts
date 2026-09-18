@@ -14,7 +14,7 @@ import { maskBit, packedMaskLength, setMaskBit } from "../../stores/gaussianTran
 export type RectangleSelectionMode = "replace" | "add" | "remove";
 export interface SelectionRectangle { minX: number; minY: number; maxX: number; maxY: number }
 
-const PROCESS_SELECTION_GLSL = /* glsl */ `
+export const PROCESS_SELECTION_GLSL = /* glsl */ `
 uniform mat4 uOoosplatViewProjection;
 uniform mat4 uOoosplatModelMatrix;
 uniform vec4 uOoosplatSelectionRect;
@@ -46,6 +46,45 @@ void process() {
             && cropContains(center);
     }
     writeOoosplatScratch(vec4(hit ? 1.0 : 0.0));
+}
+`;
+
+export const PROCESS_SELECTION_WGSL = /* wgsl */ `
+uniform uOoosplatViewProjection: mat4x4f;
+uniform uOoosplatModelMatrix: mat4x4f;
+uniform uOoosplatSelectionRect: vec4f;
+uniform uOoosplatSelectionCropKind: f32;
+uniform uOoosplatSelectionCropCenter: vec3f;
+uniform uOoosplatSelectionCropSize: vec3f;
+uniform uOoosplatSelectionCropRadius: f32;
+uniform uOoosplatSelectionOperation: f32;
+
+fn cropContains(center: vec3f) -> bool {
+    if (uniform.uOoosplatSelectionCropKind < 0.5) {
+        return true;
+    }
+    if (uniform.uOoosplatSelectionCropKind < 1.5) {
+        return distance(center, uniform.uOoosplatSelectionCropCenter) <= uniform.uOoosplatSelectionCropRadius;
+    }
+    return all(abs(center - uniform.uOoosplatSelectionCropCenter) <= uniform.uOoosplatSelectionCropSize * 0.5);
+}
+
+fn process() {
+    let center = (uniform.uOoosplatModelMatrix * vec4f(getCenter(), 1.0)).xyz;
+    let deleted = loadOoosplatDeleted().r > 0.5;
+    var hit = false;
+    if (uniform.uOoosplatSelectionOperation > 0.5) {
+        hit = !deleted && !cropContains(center);
+    } else {
+        let clip = uniform.uOoosplatViewProjection * vec4f(center, 1.0);
+        let ndc = clip.xy / max(abs(clip.w), 0.000001);
+        hit = !deleted
+            && clip.w > 0.0
+            && ndc.x >= uniform.uOoosplatSelectionRect.x && ndc.x <= uniform.uOoosplatSelectionRect.z
+            && ndc.y >= uniform.uOoosplatSelectionRect.y && ndc.y <= uniform.uOoosplatSelectionRect.w
+            && cropContains(center);
+    }
+    writeOoosplatScratch(vec4f(select(0.0, 1.0, hit)));
 }
 `;
 
@@ -120,7 +159,7 @@ export class GaussianSelectionController {
       device,
       { component },
       { component, streams: ["ooosplatScratch"] },
-      { processGLSL: PROCESS_SELECTION_GLSL },
+      { processGLSL: PROCESS_SELECTION_GLSL, processWGSL: PROCESS_SELECTION_WGSL },
     );
   }
 
