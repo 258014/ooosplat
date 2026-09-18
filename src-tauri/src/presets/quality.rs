@@ -144,13 +144,13 @@ impl Quality {
                 brush_tuning: BrushTuning::brush_defaults(),
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::balanced(),
-                // The global mapper is being trialled on the Fast preset only.
-                // Measured on phone-orbit footage the incremental mapper
-                // registered 3/164 and 7/82 images where the global mapper
-                // registered 164/164 and 78/82, so this tier is expected to
-                // reconstruct worse and to fail outright on such material until
-                // the trial is widened to it.
-                mapper_backend: MapperPreference::ForceIncremental,
+                // 0.5.0 起三档统一用 global mapper。早期只在 Fast 试点，依据是手机环绕素材上
+                // 增量 mapper 只注册 3/164、7/82，而 global mapper 注册 164/164、78/82。
+                // 试点铺开的依据：选帧已换成"按运动量重新分配窗口配额"的那一版，
+                // 同一段素材上增量 mapper 现在也能全量注册（Fast 档重复三次均为单模型）。
+                // 注意 `PreferGlobal` 在断点续跑里接受任何已记录的 backend，所以既有项目
+                // 不会被强制改用 global；新项目与重新生成的才走 global。
+                mapper_backend: MapperPreference::PreferGlobal,
                 sequential_overlap: 15,
                 feature_max_image_size: 1600,
                 feature_max_num_features: 8192,
@@ -165,8 +165,9 @@ impl Quality {
                 brush_tuning: BrushTuning::high_detail(),
                 enable_smart_filter: true,
                 smart_filter_config: FrameFilterConfig::high(),
-                // Same trial scope as Balanced: see the note there.
-                mapper_backend: MapperPreference::ForceIncremental,
+                // Same choice as Balanced: every tier prefers the global mapper since 0.5.0;
+                // see the note there.
+                mapper_backend: MapperPreference::PreferGlobal,
                 sequential_overlap: 20,
                 feature_max_image_size: 2000,
                 feature_max_num_features: 16384,
@@ -282,21 +283,16 @@ mod tests {
     }
 
     #[test]
-    fn only_the_fast_preset_trials_the_global_mapper() {
-        // The global mapper is deliberately trialled on one preset first, so a
-        // change that widens or narrows that scope has to be intentional.
-        assert_eq!(
-            Quality::Fast.preset().mapper_backend,
-            MapperPreference::PreferGlobal
-        );
-        assert_eq!(
-            Quality::Balanced.preset().mapper_backend,
-            MapperPreference::ForceIncremental
-        );
-        assert_eq!(
-            Quality::High.preset().mapper_backend,
-            MapperPreference::ForceIncremental
-        );
+    fn every_preset_prefers_the_global_mapper() {
+        // 0.5.0 起三档统一用 global mapper。这条测试是刻意的"改动必须是有意的"闸门：
+        // 早期只在 Fast 试点，后来按实测铺开到全部档位，将来若再收窄也必须先改这里。
+        for quality in [Quality::Fast, Quality::Balanced, Quality::High] {
+            assert_eq!(
+                quality.preset().mapper_backend,
+                MapperPreference::PreferGlobal,
+                "{quality:?} 应与其他档位一致地优先使用 global mapper"
+            );
+        }
 
         // The preference must still degrade safely when the engine has no global
         // mapper at all.
