@@ -27,6 +27,18 @@ See the [OOOSplat Roadmap](ROADMAP_EN.md) for planned work.
 - **Security and privacy protection**: Source media, extracted frames, camera reconstruction data, Gaussian models, and logs stay in the user-selected local project directory by default. The core generation workflow runs on the user's machine, so original videos, images, and models do not need to be uploaded to third-party reconstruction or training platforms. This reduces exposure risks during network transfer, cloud retention, and unauthorized access.
 - **Fully local compute**: Reconstruction and training run on the user's own machine without remote compute services. COLMAP automatically uses a compatible local NVIDIA GPU when available and falls back to CPU otherwise, keeping both processing and data under the user's control.
 
+## Demo Video
+
+<p align="center">
+  <a href="assets/showcase/ooosplat-demo.mp4">
+    <img src="assets/showcase/ooosplat-demo-cover.jpg" alt="OOOSplat Gaussian generation, editing, and animation export demo" width="900">
+  </a>
+</p>
+
+<p align="center">
+  <a href="assets/showcase/ooosplat-demo.mp4"><strong>▶ Watch the OOOSplat demo video</strong></a>
+</p>
+
 ## Interface Preview
 
 ### Create and Manage Tasks

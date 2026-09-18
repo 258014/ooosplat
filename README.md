@@ -27,6 +27,18 @@ Windows 和 Apple Silicon macOS Alpha 均随应用提供 FFmpeg、FFprobe、COLM
 - **安全与隐私保护**：素材、抽帧、相机重建数据、高斯模型和日志默认只保存在用户选择的本地项目目录，核心生成流程在本机完成，无需将原始视频、图像或模型上传到第三方重建与训练平台，从而减少数据在网络传输、云端留存和未经授权访问过程中的泄露风险。
 - **完全本地化算力**：重建与训练均在用户自己的电脑上运行，不调用远程计算服务。满足要求时 COLMAP 自动使用本机 NVIDIA GPU 加速，否则回退 CPU，过程和数据始终由用户掌控。
 
+## 展示视频
+
+<p align="center">
+  <a href="assets/showcase/ooosplat-demo.mp4">
+    <img src="assets/showcase/ooosplat-demo-cover.jpg" alt="OOOSplat 高斯泼溅生成、编辑与动画导出演示" width="900">
+  </a>
+</p>
+
+<p align="center">
+  <a href="assets/showcase/ooosplat-demo.mp4"><strong>▶ 点击播放 OOOSplat 展示视频</strong></a>
+</p>
+
 ## 界面预览
 
 ### 创建与管理任务
