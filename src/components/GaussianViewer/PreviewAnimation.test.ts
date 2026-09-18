@@ -4,6 +4,7 @@ import {
   ORBIT_DEGREES_PER_SECOND,
   ORBIT_START_SECONDS,
   PREVIEW_ANIMATION_GLSL,
+  PREVIEW_ANIMATION_WGSL,
   REVEAL_DURATION_SECONDS,
   SHOCKWAVE_DURATION_SECONDS,
   VIDEO_DURATION_SECONDS,
@@ -66,6 +67,17 @@ describe("PreviewAnimation", () => {
 
   it("uses the OOOSplat theme blue for the shockwave transition", () => {
     expect(PREVIEW_ANIMATION_GLSL).toContain("vec3(0.117647, 0.360784, 1.0)");
+    expect(PREVIEW_ANIMATION_WGSL).toContain("vec3f(0.117647, 0.360784, 1.0)");
     expect(PREVIEW_ANIMATION_GLSL).not.toContain("vec3(1.0, 0.68, 0.24)");
+    expect(PREVIEW_ANIMATION_WGSL).not.toContain("vec3f(1.0, 0.68, 0.24)");
+  });
+
+  it("provides equivalent work-buffer hooks for WebGL2 and WebGPU", () => {
+    for (const hook of ["modifySplatCenter", "modifySplatRotationScale", "modifySplatColor"]) {
+      expect(PREVIEW_ANIMATION_GLSL).toContain(hook);
+      expect(PREVIEW_ANIMATION_WGSL).toContain(hook);
+    }
+    expect(PREVIEW_ANIMATION_WGSL).toContain("loadOoosplatDeleted()");
+    expect(PREVIEW_ANIMATION_WGSL).toContain("loadOoosplatSelected()");
   });
 });

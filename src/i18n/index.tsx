@@ -315,7 +315,7 @@ const zhCN = {
   "viewer.packaging": "正在封装 MP4",
   "viewer.saving": "正在保存",
   "viewer.resourceNote": "预览与生成任务正在同时使用图形资源，显存不足时交互可能暂时变慢。",
-  "viewer.initializing": "正在初始化 WebGL2 渲染器",
+  "viewer.initializing": "正在初始化图形渲染器",
   "viewer.mounting": "正在创建高斯泼溅 GPU 资源",
   "viewer.loading": "正在读取高斯泼溅文件",
   "viewer.phaseInitializing": "初始化中",
@@ -360,9 +360,9 @@ const zhCN = {
   "viewer.stateSaving": "保存中",
   "viewer.stateFailed": "保存失败",
   "viewer.stateDirty": "未保存",
-  "viewer.contextLost": "WebGL2 图形上下文已丢失。大模型可能超过当前显卡或驱动可分配的单次图形资源，请关闭其他图形应用后重新加载。",
+  "viewer.contextLost": "图形设备或渲染上下文已丢失。大模型可能超过当前显卡或驱动可分配的单次图形资源，请关闭其他图形应用后重新加载。",
   "viewer.invalidBounds": "PLY 已加载，但无法读取有效的模型边界。请确认该文件是 OOOSplat 生成的 Brush Gaussian PLY。",
-  "viewer.initTimeout": "WebGL2 渲染器初始化超时。请更新显卡驱动和 Microsoft Edge WebView2 Runtime 后重试。",
+  "viewer.initTimeout": "图形渲染器初始化超时。请更新显卡驱动和 Microsoft Edge WebView2 Runtime 后重试。",
   "viewer.cameraNotReady": "预览相机尚未就绪。",
   "viewer.selectorNotReady": "Gaussian 选择器尚未就绪",
   "viewer.textureCapacity": "当前显卡支持的最大纹理尺寸为 {maximum}，但该模型需要至少 {required}。无法安全创建预览资源。",
@@ -478,6 +478,12 @@ const en: Record<TranslationKey, string> = {
   "panel.dragHint": "Drag an axis label to adjust quickly", "panel.scrubTitle": "{name}: hold the left mouse button and drag horizontally; hold Shift for fine adjustment", "panel.scrubAria": "Drag to adjust {name}", "panel.modelTransform": "Model transform", "panel.position": "Position", "panel.rotation": "Rotation", "panel.angle": "Degrees", "panel.scale": "Scale", "panel.uniform": "Uniform", "panel.uniformScale": "Uniform scale", "panel.region": "Selection region", "panel.sphere": "Sphere", "panel.box": "Box", "panel.keepInside": "{kind} · Keep inside", "panel.regionPosition": "Region position {axis}", "panel.boxSize": "Box size {axis}", "panel.radius": "Radius", "panel.size": "Size", "panel.sphereRadius": "Sphere radius", "panel.noCrop": "No crop is active. Enabling it again will create a new {kind} region around the full model.", "panel.enableCrop": "Enable {kind} crop", "panel.invalidRange": "Enter a value between {min} and {max}",
   "animation.reveal": "Reveal", "animation.shockwave": "Shockwave", "animation.orbit": "Orbit", "animation.complete": "Complete",
 };
+
+Object.assign(en, {
+  "viewer.initializing": "Initializing graphics renderer",
+  "viewer.contextLost": "The graphics device or rendering context was lost. A large model may exceed the size of a single graphics allocation supported by this GPU or driver. Close other graphics apps and reload.",
+  "viewer.initTimeout": "Graphics renderer initialization timed out. Update the graphics driver and Microsoft Edge WebView2 Runtime, then retry.",
+});
 
 const STORAGE_KEY = "ooo-splat-language";
 let activeLocale: Locale = "zh-CN";

@@ -66,3 +66,21 @@ export function copyFlippedRgbaRows(
     target.set(source.subarray(sourceOffset, sourceOffset + rowBytes), targetOffset);
   }
 }
+
+export function copyRgbaReadbackRows(
+  source: Uint8Array | Uint8ClampedArray,
+  target: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  flipY: boolean,
+) {
+  if (flipY) {
+    copyFlippedRgbaRows(source, target, width, height);
+    return;
+  }
+  const requiredBytes = width * height * 4;
+  if (source.byteLength < requiredBytes || target.byteLength < requiredBytes) {
+    throw new Error(translate(getCurrentLocale(), "viewer.framePixels"));
+  }
+  target.set(source.subarray(0, requiredBytes));
+}

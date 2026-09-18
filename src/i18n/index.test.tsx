@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { detectSystemLocale, LanguageProvider, readInitialLocale, useI18n } from ".";
+import { detectSystemLocale, LanguageProvider, readInitialLocale, translate, useI18n } from ".";
 
 function Harness() {
   const { locale, t, toggleLocale, formatDuration } = useI18n();
@@ -44,6 +44,13 @@ describe("interface language", () => {
     expect(readInitialLocale()).toBe("en");
     window.localStorage.setItem("ooo-splat-language", "broken");
     expect(["zh-CN", "en"]).toContain(readInitialLocale());
+  });
+
+  it("uses backend-neutral renderer status messages", () => {
+    expect(translate("zh-CN", "viewer.initializing")).toBe("正在初始化图形渲染器");
+    expect(translate("en", "viewer.initializing")).toBe("Initializing graphics renderer");
+    expect(translate("zh-CN", "viewer.contextLost")).not.toContain("WebGL2");
+    expect(translate("en", "viewer.contextLost")).not.toContain("WebGL2");
   });
 
   it("switches immediately, localizes formatting, and persists the explicit choice", async () => {
