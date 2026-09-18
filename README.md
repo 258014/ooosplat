@@ -29,15 +29,7 @@ Windows 和 Apple Silicon macOS Alpha 均随应用提供 FFmpeg、FFprobe、COLM
 
 ## 展示视频
 
-<p align="center">
-  <a href="assets/showcase/ooosplat-demo.mp4">
-    <img src="assets/showcase/ooosplat-demo-cover.jpg" alt="OOOSplat 高斯泼溅生成、编辑与动画导出演示" width="900">
-  </a>
-</p>
-
-<p align="center">
-  <a href="assets/showcase/ooosplat-demo.mp4"><strong>▶ 点击播放 OOOSplat 展示视频</strong></a>
-</p>
+https://github.com/user-attachments/assets/5b9e8cef-4c71-4bfa-ba23-641fcdd37659
 
 ## 界面预览
 

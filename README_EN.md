@@ -29,15 +29,7 @@ See the [OOOSplat Roadmap](ROADMAP_EN.md) for planned work.
 
 ## Demo Video
 
-<p align="center">
-  <a href="assets/showcase/ooosplat-demo.mp4">
-    <img src="assets/showcase/ooosplat-demo-cover.jpg" alt="OOOSplat Gaussian generation, editing, and animation export demo" width="900">
-  </a>
-</p>
-
-<p align="center">
-  <a href="assets/showcase/ooosplat-demo.mp4"><strong>▶ Watch the OOOSplat demo video</strong></a>
-</p>
+https://github.com/user-attachments/assets/5b9e8cef-4c71-4bfa-ba23-641fcdd37659
 
 ## Interface Preview
 
