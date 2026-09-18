@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>global vs incremental mapper：五个规模点的实测</title>
+<style>
+  :root {
+    --bg: #0f1218; --panel: #161b24; --line: #262d3a; --text: #e6e9ef;
+    --muted: #8b93a5; --global: #4da3ff; --inc: #ff9f43; --good: #35c98a;
+    --bad: #ff5f56; --warn: #ffc857;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 40px 32px 56px; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; line-height: 1.6;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 6px; font-weight: 650; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 30px; }
+  .note {
+    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+    border-radius: 6px; padding: 14px 18px; margin: 0 0 28px; font-size: 14px; color: #cfd6e4;
+  }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: 14px; }
+  th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--line); }
+  th { background: #1b2029; color: var(--muted); font-weight: 600;
+       font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+  tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 4px;
+         font-size: 12px; font-weight: 600; }
+  .tag.g { background: rgba(77,163,255,.15); color: var(--global); }
+  .tag.i { background: rgba(255,159,67,.15); color: var(--inc); }
+  .tag.no { background: rgba(255,95,86,.15); color: var(--bad); }
+  .verdict { font-weight: 600; }
+  .verdict.g { color: var(--global); }
+  .verdict.i { color: var(--inc); }
+
+  /* 对数刻度条：宽度已按 log10(秒) 归一化到 2.0(=100s) 上限，超过则截断并标记 */
+  .bars { margin-top: 34px; }
+  .brow { display: grid; grid-template-columns: 96px 1fr; gap: 16px; align-items: start;
+          margin-bottom: 16px; }
+  .brow .label { font-size: 13px; color: var(--muted); text-align: right; padding-top: 5px; }
+  .stack { display: flex; flex-direction: column; gap: 5px; }
+  .bar { height: 26px; border-radius: 5px; display: flex; align-items: center;
+         padding: 0 10px; font-size: 12px; font-weight: 600; color: #0f1218;
+         white-space: nowrap; overflow: hidden; }
+  .bar.g { background: var(--global); }
+  .bar.i { background: var(--inc); }
+  .bar.over { background: repeating-linear-gradient(45deg,
+      var(--bad), var(--bad) 7px, #c8403a 7px, #c8403a 14px); color: #fff; }
+  .axis { display: grid; grid-template-columns: 96px 1fr; gap: 16px;
+          font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .axis .marks { position: relative; height: 16px; border-top: 1px solid var(--line); }
+  .axis .marks span { position: absolute; top: 2px; transform: translateX(-50%); }
+  .axis .marks span:first-child { transform: none; }
+  .axis .marks span:last-child { transform: translateX(-100%); }
+  .legend { display: flex; flex-wrap: wrap; gap: 22px; margin: 14px 0 0 112px;
+            font-size: 13px; color: var(--muted); }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px;
+              margin-right: 7px; vertical-align: middle; }
+
+  h2 { font-size: 17px; margin: 42px 0 14px; font-weight: 620; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(248px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: 8px; padding: 16px 18px; }
+  .card h3 { margin: 0 0 8px; font-size: 14px; }
+  .card p { margin: 0; font-size: 13.5px; color: #b9c1d1; }
+  code { background: #1b2029; padding: 1px 6px; border-radius: 4px;
+         font-size: 12.5px; color: #a9d5ff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>global mapper 的规模天花板：五个实测点</h1>
+  <div class="sub">
+    同一段 1920×1080 手持素材 · Fast 参数（1280px / 8192 特征 / overlap 12）· 同一次会话内测量
+  </div>
+
+  <div class="note">
+    <strong>结论先行：</strong>600 帧是分界。以内 global 又快又好；超过之后它的<b>全局定位阶段</b>
+    （135 万轨迹 / 1044 万观测的 BA）从秒级变成小时级——而 GPU BA 因引擎的 Ceres 未编译 cuDSS
+    而静默回落到 CPU 求解器（日志原文：<code>Ceres was compiled without cuDSS support</code>），
+    于是它既不失败也不返回，用户只能手动取消。
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>帧数</th>
+        <th>incremental</th>
+        <th>global（GLOMAP）</th>
+        <th>谁更适合</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="num"><b>265</b></td>
+        <td class="num">270 s · 2 块（最大 95.8%）</td>
+        <td class="num">101 s · 1 块 95.5%</td>
+        <td class="verdict g">global 快 2.7×</td>
+      </tr>
+      <tr>
+        <td class="num"><b>299</b></td>
+        <td class="num">341~357 s · 1 块 100%</td>
+        <td class="num">142~149 s · 1 块 100%</td>
+        <td class="verdict g">global 快 2.4×</td>
+      </tr>
+      <tr>
+        <td class="num"><b>600</b></td>
+        <td class="num">436 s · <span class="tag i">12 块</span> 最大仅 23.3%</td>
+        <td class="num">432 s · <span class="tag g">1 块</span> 94.8%</td>
+        <td class="verdict g">同耗时，质量压倒</td>
+      </tr>
+      <tr>
+        <td class="num"><b>1200</b></td>
+        <td class="num">2697 s（45 min）· 21 块 · 20.9%</td>
+        <td class="num"><span class="tag no">&gt;68 分钟未完成</span></td>
+        <td class="verdict i">只剩增量能跑完</td>
+      </tr>
+      <tr>
+        <td class="num"><b>2121</b></td>
+        <td class="num">3049 s（51 min）· 21 块 · 合计 96.9%</td>
+        <td class="num"><span class="tag no">&gt;58 分钟被用户取消</span></td>
+        <td class="verdict i">只剩增量能跑完</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="bars">
+    <h2>耗时对比（对数刻度）</h2>
+
+    <!-- 宽度 = log10(秒)/2.6 上限截断；标签给出准确值 -->
+    <div class="brow">
+      <div class="label">265 帧</div>
+      <div class="stack">
+        <div class="bar g" style="width:54.2%">global 101 s</div>
+        <div class="bar i" style="width:65.7%">incremental 270 s</div>
+      </div>
+    </div>
+
+    <div class="brow">
+      <div class="label">299 帧</div>
+      <div class="stack">
+        <div class="bar g" style="width:58.4%">global 145 s</div>
+        <div class="bar i" style="width:68.7%">incremental 349 s</div>
+      </div>
+    </div>
+
+    <div class="brow">
+      <div class="label">600 帧</div>
+      <div class="stack">
+        <div class="bar g" style="width:71.2%">global 432 s</div>
+        <div class="bar i" style="width:71.4%">incremental 436 s</div>
+      </div>
+    </div>
+
+    <div class="brow">
+      <div class="label">1200 帧</div>
+      <div class="stack">
+        <div class="bar over" style="width:97.6%">global &gt;68 min 未完成（人工终止）</div>
+        <div class="bar i" style="width:92.8%">incremental 2697 s（45 min）</div>
+      </div>
+    </div>
+
+    <div class="brow">
+      <div class="label">2121 帧</div>
+      <div class="stack">
+        <div class="bar over" style="width:95.9%">global &gt;58 min 被用户取消</div>
+        <div class="bar i" style="width:94.2%">incremental 3049 s（51 min）</div>
+      </div>
+    </div>
+
+    <div class="axis">
+      <div></div>
+      <div class="marks">
+        <span style="left:27.0%">10 s</span>
+        <span style="left:48.1%">1 min</span>
+        <span style="left:75.1%">10 min</span>
+        <span style="left:96.1%">1 h</span>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span><i style="background:var(--global)"></i>global 正常完成</span>
+      <span><i style="background:var(--inc)"></i>incremental 正常完成</span>
+      <span><i style="background:repeating-linear-gradient(45deg,var(--bad),var(--bad) 4px,#c8403a 4px,#c8403a 8px)"></i>global 未完成（超时 / 取消，条长已达上限）</span>
+    </div>
+  </div>
+
+  <h2>这五个点说明什么</h2>
+  <div class="cards">
+    <div class="card">
+      <h3>① global 的成本超线性</h3>
+      <p>145 s（299 帧）→ 432 s（600 帧）→ &gt;68 min（1200 帧）。全局定位的 BA 规模 ∝ 观测数，而观测数 ∝ 帧数 × 每帧特征数。</p>
+    </div>
+    <div class="card">
+      <h3>② 增量从 600 帧起就碎</h3>
+      <p>600 帧 12 块（最大 23.3%）、1200 帧 21 块、2121 帧 21 块——用户拿到的主模型始终只用了约 1/5 的素材。</p>
+    </div>
+    <div class="card">
+      <h3>③ 600 帧是分界</h3>
+      <p>600 帧时两者耗时几乎相同，但质量差距悬殊（1 块 94.8% vs 12 块 23.3%）；再往上 global 直接不可用。所以阈值取 600，而不是更低。</p>
+    </div>
+    <div class="card">
+      <h3>④ GPU BA 缺失是放大器</h3>
+      <p>日志确认每次 BA 都回落到 CPU。若引擎带 cuDSS，这个天花板的绝对位置会上移（但按规模切换的逻辑仍需保留）。</p>
+    </div>
+    <div class="card">
+      <h3>⑤ 因此改动是「按规模切 + 超时兜底」</h3>
+      <p>阈值 <code>600 × 8192 / 每帧特征数</code>（8192 档 600 帧、16384 档 300 帧）；再加 <code>max(10 min, 帧数 × 1.5 s)</code> 预算，超时用子令牌单独终止并回退增量。</p>
+    </div>
+    <div class="card">
+      <h3>⚠️ 证据边界</h3>
+      <p>601~1199 之间没有单独测；超时路径只做了数值推导、未真实触发；图片序列输入未覆盖。运动更剧烈的素材安全上限可能更低。</p>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
