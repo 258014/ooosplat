@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    engines::MapperBackend,
     error::{Result, SplatError},
     pipeline::{estimate::RuntimeSample, PipelineStage},
     project::{manager::atomic_write_json, ProjectMetadata, ProjectStatus, PROJECT_APP_ID},
@@ -33,15 +34,22 @@ pub async fn runtime_samples() -> Vec<RuntimeSample> {
             continue;
         };
         let state_bytes = tokio::fs::read(item.path.join("state.json")).await.ok();
-        let Some(extracted_frames) = runtime_sample_frame_count(
+        let Some(mapped_frames) = runtime_sample_frame_count(
             state_bytes.as_deref(),
             metadata.output.as_ref().map(|output| output.input_images),
         ) else {
             continue;
         };
+        // Without a recorded backend the sample cannot be normalised by the model
+        // that produced it, and a wrong model turns the calibration ratio into a
+        // model-gap multiplier. Skip it rather than assume the incremental mapper.
+        let Some(backend) = runtime_sample_backend(state_bytes.as_deref()) else {
+            continue;
+        };
         samples.push(RuntimeSample {
             quality: metadata.quality,
-            extracted_frames,
+            backend,
+            mapped_frames,
             duration_ms,
         });
         if samples.len() == 20 {
@@ -51,6 +59,12 @@ pub async fn runtime_samples() -> Vec<RuntimeSample> {
     samples
 }
 
+/// Images this run actually fed to COLMAP.
+///
+/// The estimate is calibrated against the same basis, so the filtered count wins
+/// over the pre-filter extraction count whenever the smart filter has run. The
+/// pipeline output's `input_images` is the count the validator measured inside
+/// the frame directory, which is already post-filter.
 fn runtime_sample_frame_count(
     state_bytes: Option<&[u8]>,
     output_frames: Option<u64>,
@@ -58,12 +72,37 @@ fn runtime_sample_frame_count(
     state_bytes
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
         .and_then(|state| {
-            state
-                .pointer("/frames/extractedFrames")
-                .and_then(|value| value.as_u64())
+            ["/frames/filteredFrames", "/frames/extractedFrames"]
+                .into_iter()
+                .find_map(|pointer| {
+                    state
+                        .pointer(pointer)
+                        .and_then(|value| value.as_u64())
+                        .filter(|count| *count > 0)
+                })
         })
         .or(output_frames)
         .filter(|count| *count > 0)
+}
+
+/// Mapper backend a run actually used, read from its checkpoint.
+///
+/// `None` means the checkpoint does not say, which is not the same as "the
+/// incremental mapper": projects completed before the field existed, and projects
+/// built by other tooling, have run `global_mapper` without recording it. Such a
+/// sample cannot be normalised by the model that produced it, so callers must
+/// drop it instead of guessing a backend.
+fn runtime_sample_backend(state_bytes: Option<&[u8]>) -> Option<MapperBackend> {
+    state_bytes
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|state| {
+            state
+                .pointer("/mapperBackend")
+                .and_then(|value| value.as_str())
+                .and_then(|value| {
+                    serde_json::from_value(serde_json::Value::String(value.into())).ok()
+                })
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +153,18 @@ pub struct ProjectOverview {
     pub projects: Vec<ProjectSummary>,
 }
 
+/// Folder name used for this build's settings, project index and default
+/// projects root.
+///
+/// A second, independently installed build sets `OOOSPLAT_DATA_DIR` at compile
+/// time so it keeps its own settings and project list instead of sharing the
+/// installed product's. Builds without that variable keep the original name, so
+/// existing installations are unaffected.
+const APP_DATA_DIR: &str = match option_env!("OOOSPLAT_DATA_DIR") {
+    Some(name) => name,
+    None => "SplatStudio",
+};
+
 struct CompletionSnapshot {
     path: Option<PathBuf>,
     info: Option<crate::reconstruction::ply::PlyInfo>,
@@ -158,7 +209,7 @@ pub(crate) async fn project_is_durably_completed(root: &Path, metadata: &Project
 
 pub(crate) fn app_data_root() -> Result<PathBuf> {
     dirs::data_local_dir()
-        .map(|v| v.join("SplatStudio"))
+        .map(|v| v.join(APP_DATA_DIR))
         .ok_or_else(|| SplatError::Process("无法定位本机应用数据目录".into()))
 }
 fn settings_path() -> Result<PathBuf> {
@@ -169,7 +220,7 @@ fn index_path() -> Result<PathBuf> {
 }
 pub fn default_projects_root() -> Result<PathBuf> {
     dirs::document_dir()
-        .map(|v| v.join("SplatStudio").join("Projects"))
+        .map(|v| v.join(APP_DATA_DIR).join("Projects"))
         .ok_or_else(|| SplatError::Process("无法定位 Documents 目录".into()))
 }
 
@@ -483,6 +534,7 @@ mod tests {
             model: "final.ply".into(),
             transform: Default::default(),
             editing: Default::default(),
+            reshoot: None,
         }
     }
 
@@ -523,6 +575,19 @@ mod tests {
         let current_state = br#"{"frames":{"extractedFrames":320}}"#;
         assert_eq!(
             runtime_sample_frame_count(Some(current_state), Some(533)),
+            Some(320)
+        );
+        // Calibration compares against the post-filter count, so the filtered
+        // value must win over the raw extraction count.
+        let filtered_state = br#"{"frames":{"extractedFrames":320,"filteredFrames":96}}"#;
+        assert_eq!(
+            runtime_sample_frame_count(Some(filtered_state), Some(533)),
+            Some(96)
+        );
+        // A zero filtered count must not shadow a usable extraction count.
+        let zero_filtered = br#"{"frames":{"extractedFrames":320,"filteredFrames":0}}"#;
+        assert_eq!(
+            runtime_sample_frame_count(Some(zero_filtered), Some(533)),
             Some(320)
         );
         assert_eq!(runtime_sample_frame_count(None, Some(0)), None);
@@ -570,6 +635,32 @@ mod tests {
     }
 
     #[test]
+    fn runtime_sample_backend_reads_the_recorded_mapper() {
+        // The two backends have different cost models, so a sample can only
+        // calibrate machine speed when it is normalised by the model that ran.
+        assert_eq!(
+            runtime_sample_backend(Some(br#"{"mapperBackend":"global"}"#)),
+            Some(MapperBackend::Global)
+        );
+        assert_eq!(
+            runtime_sample_backend(Some(br#"{"mapperBackend":"incremental"}"#)),
+            Some(MapperBackend::Incremental)
+        );
+        // An unrecorded backend is unknown, not "incremental": projects built by
+        // other tooling have run global_mapper without writing the field, and
+        // guessing would normalise them by the wrong model.
+        assert_eq!(
+            runtime_sample_backend(Some(br#"{"stage":"completed"}"#)),
+            None
+        );
+        assert_eq!(
+            runtime_sample_backend(Some(br#"{"mapperBackend":null}"#)),
+            None
+        );
+        assert_eq!(runtime_sample_backend(None), None);
+    }
+
+    #[test]
     fn deletion_ownership_rejects_unmarked_directories() {
         let id = Uuid::new_v4();
         let metadata = ProjectMetadata {
@@ -592,6 +683,7 @@ mod tests {
             model: "final.ply".into(),
             transform: Default::default(),
             editing: Default::default(),
+            reshoot: None,
         };
         assert!(!has_project_ownership(
             &metadata,

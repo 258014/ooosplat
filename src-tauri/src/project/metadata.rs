@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    engines::MapperBackend,
     pipeline::PipelineStage,
     presets::Quality,
     video::{FramePlan, ImageSequenceInfo, VideoInfo},
@@ -164,6 +165,25 @@ pub struct ProjectOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReshootProvenance {
+    pub source_project_id: Uuid,
+    pub source_project_path: PathBuf,
+    pub source_final_ply: PathBuf,
+    pub reshoot_source_path: PathBuf,
+    pub regions: Vec<GaussianCrop>,
+    pub guidance: Vec<String>,
+    /// Annotated guide images written into the derived project: the circled
+    /// region plus arrows marking where each shot should be taken from.
+    #[serde(default)]
+    pub guidance_images: Vec<PathBuf>,
+    #[serde(default)]
+    pub original_frame_count: u64,
+    #[serde(default)]
+    pub reshoot_frame_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectMetadata {
     #[serde(default = "schema_version")]
     pub schema_version: u32,
@@ -199,10 +219,12 @@ pub struct ProjectMetadata {
     pub transform: GaussianTransform,
     #[serde(default)]
     pub editing: GaussianEditing,
+    #[serde(default)]
+    pub reshoot: Option<ReshootProvenance>,
 }
 
 pub const fn schema_version() -> u32 {
-    5
+    6
 }
 
 fn default_model() -> String {
@@ -222,6 +244,10 @@ pub struct FrameState {
     pub mask_count: Option<u64>,
     #[serde(default)]
     pub has_alpha: bool,
+    #[serde(default)]
+    pub filtered_frames: Option<u64>,
+    #[serde(default)]
+    pub filter_config_hash: Option<String>,
 }
 
 impl From<&FramePlan> for FrameState {
@@ -234,6 +260,8 @@ impl From<&FramePlan> for FrameState {
             image_format: None,
             mask_count: None,
             has_alpha: false,
+            filtered_frames: None,
+            filter_config_hash: None,
         }
     }
 }
@@ -249,6 +277,10 @@ pub struct PipelineStateFile {
     #[serde(default)]
     pub image_sequence: Option<ImageSequenceInfo>,
     pub frames: Option<FrameState>,
+    #[serde(default)]
+    pub filter_complete: bool,
+    #[serde(default)]
+    pub mapper_backend: Option<MapperBackend>,
     pub features_complete: bool,
     pub matching_complete: bool,
     pub reconstruction_complete: bool,
@@ -268,6 +300,8 @@ impl PipelineStateFile {
             input_type,
             image_sequence: None,
             frames: None,
+            filter_complete: false,
+            mapper_backend: None,
             features_complete: false,
             matching_complete: false,
             reconstruction_complete: false,
@@ -323,6 +357,7 @@ mod tests {
         assert_eq!(metadata.model, "final.ply");
         assert_eq!(metadata.transform, GaussianTransform::default());
         assert_eq!(metadata.editing, GaussianEditing::default());
+        assert!(metadata.reshoot.is_none());
         assert_eq!(metadata.input_type, ProjectInputType::Video);
         assert_eq!(metadata.schema_version, 2);
     }

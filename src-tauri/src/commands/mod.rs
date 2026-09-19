@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,10 @@ use crate::{
     },
     error::{Result, SplatError},
     pipeline::{
-        estimate::{estimate_runtime, estimate_runtime_for_images, RuntimeEstimate},
+        estimate::{
+            estimate_runtime_for_images_with_backend, estimate_runtime_with_backend,
+            estimate_runtime_with_backend_and_mapped_frames, RuntimeEstimate,
+        },
         runner::{PipelineFailureContext, PipelineResult, PipelineRunner},
         PipelineEngine, PipelineStage,
     },
@@ -42,7 +46,7 @@ use crate::{
     },
     video::{
         analyze_image_sequence, create_image_plan, FramePlan, FrameSelectionStrategy,
-        ImageSequenceInfo, UniformRatioFrameSelection, VideoInfo,
+        ImageSequenceInfo, SmartFrameSelection, VideoInfo,
     },
 };
 
@@ -290,6 +294,20 @@ pub struct ProbeAndPlan {
     estimate: RuntimeEstimate,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReshootRequest {
+    source_project_id: String,
+    reshoot_path: String,
+    quality: Quality,
+    projects_root: String,
+    regions: Vec<GaussianCrop>,
+    guidance: Vec<String>,
+    /// PNG data URLs with the circled region and its shooting directions.
+    #[serde(default)]
+    guidance_images: Vec<String>,
+}
+
 fn paths_for_app(app: &tauri::AppHandle) -> EnginePaths {
     EnginePaths::discover(app.path().resource_dir().ok().as_deref())
 }
@@ -321,8 +339,19 @@ pub async fn probe_and_plan(
         .await
         .map_err(|error| SplatError::Process(format!("图片序列分析任务失败：{error}")))??;
         let plan = create_image_plan(&image_sequence, &quality.preset());
-        let estimate =
-            estimate_runtime_for_images(image_sequence.image_count, &plan, quality, &samples);
+        let global_available = crate::engines::colmap::supports_global_mapper(
+            &engine_paths.colmap,
+            &crate::process::ProcessManager::new(),
+        )
+        .await;
+        let backend = quality.preset().mapper_backend.backend(global_available);
+        let estimate = estimate_runtime_for_images_with_backend(
+            image_sequence.image_count,
+            &plan,
+            quality,
+            &samples,
+            backend,
+        );
         Ok(ProbeAndPlan {
             input_type: ProjectInputType::Images,
             video: None,
@@ -333,8 +362,14 @@ pub async fn probe_and_plan(
     } else {
         let video =
             probe_video(&engine_paths.ffprobe, &input, None, &ProcessManager::new()).await?;
-        let plan = UniformRatioFrameSelection.create_plan(&video, &quality.preset());
-        let estimate = estimate_runtime(&video, &plan, quality, &samples);
+        let plan = SmartFrameSelection.create_plan(&video, &quality.preset());
+        let global_available = crate::engines::colmap::supports_global_mapper(
+            &engine_paths.colmap,
+            &crate::process::ProcessManager::new(),
+        )
+        .await;
+        let backend = quality.preset().mapper_backend.backend(global_available);
+        let estimate = estimate_runtime_with_backend(&video, &plan, quality, &samples, backend);
         Ok(ProbeAndPlan {
             input_type: ProjectInputType::Video,
             video: Some(video),
@@ -377,10 +412,19 @@ pub async fn estimate_project_runtime(
     let saved_plan = state.frames.as_ref().map(|frames| FramePlan {
         retention_ratio: frames.retention_ratio,
         sampling_fps: frames.sampling_fps,
-        estimated_frames: frames
-            .extracted_frames
-            .unwrap_or(frames.estimated_frames)
-            .max(1),
+        estimated_frames: frames.estimated_frames.max(1),
+    });
+    // Smart filtering only applies to video runs, and once it has run the real
+    // post-filter count is a measurement rather than something to predict.
+    let observed_mapped_frames = state.frames.as_ref().and_then(|frames| {
+        if metadata.quality.preset().enable_smart_filter
+            && metadata.input_type == ProjectInputType::Video
+        {
+            frames.filtered_frames
+        } else {
+            frames.extracted_frames
+        }
+        .filter(|count| *count > 0)
     });
     let samples = catalog::runtime_samples().await;
     let mut estimate = match metadata.input_type {
@@ -398,9 +442,36 @@ pub async fn estimate_project_runtime(
                 }
             };
             let plan = saved_plan.unwrap_or_else(|| {
-                UniformRatioFrameSelection.create_plan(&video, &metadata.quality.preset())
+                SmartFrameSelection.create_plan(&video, &metadata.quality.preset())
             });
-            estimate_runtime(&video, &plan, metadata.quality, &samples)
+            let global_available = crate::engines::colmap::supports_global_mapper(
+                &paths_for_app(&app).colmap,
+                &crate::process::ProcessManager::new(),
+            )
+            .await;
+            let backend = state.mapper_backend.unwrap_or_else(|| {
+                metadata
+                    .quality
+                    .preset()
+                    .mapper_backend
+                    .backend(global_available)
+            });
+            match observed_mapped_frames {
+                Some(mapped_frames) => estimate_runtime_with_backend_and_mapped_frames(
+                    &video,
+                    metadata.quality,
+                    &samples,
+                    backend,
+                    mapped_frames,
+                ),
+                None => estimate_runtime_with_backend(
+                    &video,
+                    &plan,
+                    metadata.quality,
+                    &samples,
+                    backend,
+                ),
+            }
         }
         ProjectInputType::Images => {
             let image_sequence = match state.image_sequence.clone() {
@@ -414,11 +485,24 @@ pub async fn estimate_project_runtime(
             };
             let plan = saved_plan
                 .unwrap_or_else(|| create_image_plan(&image_sequence, &metadata.quality.preset()));
-            estimate_runtime_for_images(
+            let global_available = crate::engines::colmap::supports_global_mapper(
+                &paths_for_app(&app).colmap,
+                &crate::process::ProcessManager::new(),
+            )
+            .await;
+            let backend = state.mapper_backend.unwrap_or_else(|| {
+                metadata
+                    .quality
+                    .preset()
+                    .mapper_backend
+                    .backend(global_available)
+            });
+            estimate_runtime_for_images_with_backend(
                 image_sequence.image_count,
                 &plan,
                 metadata.quality,
                 &samples,
+                backend,
             )
         }
     };
@@ -568,6 +652,68 @@ pub async fn resume_pipeline(
     }
     *state.active.lock().await = None;
     result.map_err(|error| PipelineCommandError::from_runner(error, &runner))
+}
+
+#[tauri::command]
+pub async fn start_reshoot_pipeline(
+    app: tauri::AppHandle,
+    state: State<'_, PipelineController>,
+    request: ReshootRequest,
+) -> std::result::Result<PipelineResult, SplatError> {
+    let source_project_id = Uuid::parse_str(&request.source_project_id)
+        .map_err(|_| SplatError::Process("原项目 ID 无效".into()))?;
+    if request.regions.is_empty() {
+        return Err(SplatError::Process(
+            "请先在预览中圈选至少一个模糊区域".into(),
+        ));
+    }
+    for region in &request.regions {
+        region.validate()?;
+    }
+    if request.guidance.len() != request.regions.len()
+        || request.guidance_images.len() != request.regions.len()
+    {
+        return Err(SplatError::Process(
+            "补拍区域与补拍指引数量不一致，请重新圈选区域".into(),
+        ));
+    }
+    let emitter = app.clone();
+    let started = Instant::now();
+    let runner = Arc::new(PipelineRunner::new(paths_for_app(&app), move |event| {
+        let _ = emitter.emit("pipeline-event", event);
+    }));
+    {
+        let mut active = state.active.lock().await;
+        if active.is_some() {
+            return Err(SplatError::Process("已有任务正在运行".into()));
+        }
+        *active = Some(runner.clone());
+    }
+    let result = runner
+        .generate_reshoot(
+            source_project_id,
+            Path::new(&request.reshoot_path),
+            request.quality,
+            Path::new(&request.projects_root),
+            crate::pipeline::runner::ReshootPlan {
+                regions: request.regions,
+                guidance: request.guidance,
+                guidance_images: request.guidance_images,
+            },
+        )
+        .await;
+    if let Err(error) = &result {
+        let stage = if matches!(error, SplatError::Cancelled) {
+            crate::pipeline::PipelineStage::Cancelled
+        } else {
+            crate::pipeline::PipelineStage::Failed
+        };
+        let mut event = crate::pipeline::PipelineEvent::mapped(stage, 1.0, error.to_string());
+        event.elapsed_ms = started.elapsed().as_millis() as u64;
+        let _ = app.emit("pipeline-event", event);
+    }
+    *state.active.lock().await = None;
+    result
 }
 
 #[tauri::command]
