@@ -111,6 +111,10 @@ export interface ProjectOverview { projectsRoot: string; projects: ProjectSummar
 export interface AppRuntimeStatus { pipelineRunning: boolean; previewProjectId: string | null; }
 
 export type GaussianFormat = "ply" | "sog" | "spz";
+export interface SparsePreview {
+  points: [number, number, number, number, number, number][];
+  cameras: [number, number, number][];
+}
 export interface GaussianTransform {
   position: [number, number, number];
   rotation: [number, number, number];
