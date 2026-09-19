@@ -975,14 +975,17 @@ fn frame_view_difference(
 /// 增量 mapper 就从单模型 198/198 退化成两块 188+11。
 ///
 /// 三条硬约束：
-/// · **总量不变**：分配需求与 `expected_kept_frames` 的口径一致，分配后总帧数不变（容量
-///   允许时），因此密度契约与运行时预估继续成立；
+/// · **总量不变**：分配需求与 `expected_kept_frames` 的口径一致，分配后总帧数不变，因此
+///   密度契约与运行时预估继续成立。这里的关键是"每窗至少 1 帧"必须**同时**体现在配额下界
+///   与 `decide_windows` 第 5 步的兜底上：第 5 步是无条件保证每窗留一帧的，若配额允许为 0，
+///   那些窗口就会多出兜底帧，实际保留数超出预算；
 /// · **只看与挑选结果无关的量**：运动量取相邻分析帧的视图差异之和（不依赖参考帧），容量取
 ///   "清晰到可能被保留"的帧数——否则会与挑选结果互相依赖，无法确定；
 /// · **离群段截断**：单个闪光/黑场窗口的视图差异可能比常规大一个量级，权重按
 ///   `2 × 中位数` 截断，避免它把配额全吸走。
 ///
-/// 每个窗口的配额夹在 `1..=容量`；容量为 0 的窗口给 0（它本来就没有可用帧）。
+/// 每个窗口的配额夹在 `1..=上界`；上界取"档位配额"与"该窗可用帧数（至少 1）"的较小者，
+/// 所以整窗模糊的窗口也保留 1 个名额——与第 5 步的兜底行为一致。
 fn allocate_window_quotas(frames: &[AnalyzedFrame], config: &FrameFilterConfig) -> Vec<usize> {
     let window_size = config.window_size.max(1);
     let window_count = frames.len().div_ceil(window_size);
@@ -1032,32 +1035,43 @@ fn allocate_window_quotas(frames: &[AnalyzedFrame], config: &FrameFilterConfig) 
         .map(|value| value.min(ceiling))
         .collect::<Vec<_>>();
     let total_weight = clamped.iter().sum::<f64>();
-    let floor_of = |capacity: usize| usize::from(capacity > 0);
+    // 每个窗口配额的上下界：
+    // · **下界恒为 1**：`decide_windows` 第 5 步会无条件保证"每窗至少一帧"（整窗没有保留帧
+    //   时强行留下最清晰的那一帧），所以任何窗口实际都至少占 1 个名额。下界若取 0，
+    //   实际保留数就会比预算多出这些兜底帧，`expected_kept_frames` 的预测随之失真。
+    // · **上界取"该窗真正留得下的帧数"**（容量至少算 1，对应第 5 步的兜底），而**不是**档位
+    //   配额——否则快运动窗口永远超不过 `keep_per_window`，重分配就失去了意义。容量由清晰度
+    //   算出，天然不超过窗口帧数。
+    let upper = capacities
+        .iter()
+        .map(|capacity| (*capacity).max(1))
+        .collect::<Vec<_>>();
     let mut quotas = vec![0usize; window_count];
     if total_weight <= 0.0 {
-        // 量不出运动（整段近似静止）：退化成平均分配，与旧行为一致。
-        for index in 0..window_count {
-            quotas[index] = demand[index].min(capacities[index]);
-        }
-        return quotas;
+        // 量不出运动（整段近似静止）：按档位配额分配，与旧行为一致。
+        return demand
+            .iter()
+            .zip(upper.iter())
+            .map(|(demand, upper)| (*demand).min(*upper))
+            .collect();
     }
     for index in 0..window_count {
         let share = budget as f64 * clamped[index] / total_weight;
-        quotas[index] =
-            (share.round() as usize).clamp(floor_of(capacities[index]), capacities[index]);
+        quotas[index] = (share.round() as usize).clamp(1, upper[index]);
     }
     // 抹平四舍五入的差：多了就从权重最小且还能减的窗口减，少了就给权重最大且还没满的窗口加。
     let mut guard = budget.saturating_mul(2) + window_count;
     while quotas.iter().sum::<usize>() > budget && guard > 0 {
         guard -= 1;
-        let candidate = (0..window_count)
-            .filter(|index| quotas[*index] > floor_of(capacities[*index]))
-            .min_by(|left, right| {
-                clamped[*left]
-                    .partial_cmp(&clamped[*right])
-                    .unwrap_or(Ordering::Equal)
-                    .then(left.cmp(right))
-            });
+        let candidate =
+            (0..window_count)
+                .filter(|index| quotas[*index] > 1)
+                .min_by(|left, right| {
+                    clamped[*left]
+                        .partial_cmp(&clamped[*right])
+                        .unwrap_or(Ordering::Equal)
+                        .then(left.cmp(right))
+                });
         match candidate {
             Some(index) => quotas[index] -= 1,
             None => break,
@@ -1067,7 +1081,7 @@ fn allocate_window_quotas(frames: &[AnalyzedFrame], config: &FrameFilterConfig) 
     while quotas.iter().sum::<usize>() < budget && guard > 0 {
         guard -= 1;
         let candidate = (0..window_count)
-            .filter(|index| quotas[*index] < capacities[*index])
+            .filter(|index| quotas[*index] < upper[*index])
             .max_by(|left, right| {
                 clamped[*left]
                     .partial_cmp(&clamped[*right])
@@ -2695,9 +2709,10 @@ mod tests {
         );
     }
 
-    /// 容量为 0 的窗口（整窗都是模糊帧）不占配额，余量交给还能留帧的窗口。
+    /// 整窗模糊（没有可用帧）时仍占 1 个名额：`decide_windows` 第 5 步是无条件保证"每窗至少
+    /// 一帧"的，配额若给 0，那些窗口就会多出兜底帧、实际保留数超出预算。
     #[test]
-    fn window_quotas_skip_windows_without_usable_frames() {
+    fn window_quotas_keep_one_slot_for_windows_without_usable_frames() {
         let mut frames = (0..10u32)
             .map(|index| analyzed_with(&textured(index, false), index, 10.0))
             .collect::<Vec<_>>();
@@ -2706,11 +2721,63 @@ mod tests {
         );
         let config = config();
         let quotas = allocate_window_quotas(&frames, &config);
-        assert_eq!(quotas[0], 0, "整窗模糊、没有可用帧时不给配额：{quotas:?}");
+        assert_eq!(
+            quotas[0], 1,
+            "整窗模糊也要留 1 个名额，否则第 5 步的兜底帧会突破预算：{quotas:?}"
+        );
         assert_eq!(
             quotas.iter().sum::<usize>(),
             2 * config.keep_per_window,
-            "余量必须全给另一个窗口，总量不变：{quotas:?}"
+            "余量给另一个窗口，总量不变：{quotas:?}"
+        );
+    }
+
+    /// 端到端契约：运动量极端不均时，**每个窗口都至少保留一帧**，且实际保留数不低于
+    /// `expected_kept_frames` 的预测（补缝可能再多加几帧，这是文档写明的既有行为）。
+    ///
+    /// 这条针对的缺陷是"零容量窗口的配额被分配成 0、而第 5 步仍强留一帧"——那种情况下
+    /// 窗口数会把总数顶高，配额与兜底对"每窗至少一帧"的理解必须一致。
+    #[test]
+    fn kept_count_covers_the_prediction_when_motion_varies_wildly() {
+        // 三段：静止（权重≈0）、整段模糊（容量 0）、快运动（权重很大）。
+        let mut frames = (0..10u32)
+            .map(|index| analyzed_with(&textured(0, false), index, 500.0))
+            .collect::<Vec<_>>();
+        frames.extend(
+            (0..10u32).map(|index| analyzed_with(&textured(index, false), 10 + index, 10.0)),
+        );
+        frames.extend(
+            (0..10u32).map(|index| analyzed_with(&textured(index * 9, false), 20 + index, 500.0)),
+        );
+        let config = FrameFilterConfig {
+            min_diff_score: 0.0,
+            ..config()
+        };
+        let expected = expected_kept_frames(frames.len() as u64, &config);
+        let quotas = allocate_window_quotas(&frames, &config);
+        assert_eq!(
+            quotas.iter().sum::<usize>(),
+            expected as usize,
+            "配额总量必须等于预测值：{quotas:?}"
+        );
+        assert!(
+            quotas.iter().all(|quota| *quota >= 1),
+            "每个窗口都要占至少一个名额：{quotas:?}"
+        );
+
+        decide_windows(&mut frames, &config);
+        let per_window = frames
+            .chunks(config.window_size)
+            .map(|window| window.iter().filter(|frame| frame.metrics.kept).count())
+            .collect::<Vec<_>>();
+        assert!(
+            per_window.iter().all(|count| *count >= 1),
+            "每窗至少留一帧：{per_window:?}"
+        );
+        let kept = frames.iter().filter(|frame| frame.metrics.kept).count();
+        assert!(
+            kept >= expected as usize,
+            "实际保留 {kept} 帧少于预测 {expected} 帧（配额 {quotas:?}，每窗 {per_window:?}）"
         );
     }
 
