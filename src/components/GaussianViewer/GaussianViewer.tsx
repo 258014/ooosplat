@@ -33,6 +33,9 @@ import {
   WORKBUFFER_UPDATE_ONCE,
   type Application as PcApplication,
   type CameraComponent,
+  // 重拍引导截图需要 WebGL 设备的像素读回接口；上游切到 WebGPU 预览后端后
+  // 这个类型在本文件的其它路径上不再使用，但 `captureReshootFrame` 仍然需要它。
+  type WebglGraphicsDevice,
 } from "playcanvas";
 import {
   ArrowLeft,
