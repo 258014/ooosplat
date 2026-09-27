@@ -134,13 +134,85 @@ pub fn prepare_image_sequence(
     validate_prepared_image_sequence(frames_dir, masks_dir, info.image_count, info.has_alpha)
 }
 
+pub fn prepare_reshoot_image_sequence(
+    source_dir: &Path,
+    frames_dir: &Path,
+    masks_dir: &Path,
+) -> Result<PreparedImageSequence> {
+    prepare_reshoot_image_sequence_with_progress(source_dir, frames_dir, masks_dir, |_, _| {})
+}
+
+pub fn prepare_reshoot_image_sequence_with_progress(
+    source_dir: &Path,
+    frames_dir: &Path,
+    masks_dir: &Path,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<PreparedImageSequence> {
+    let info = analyze_image_sequence(source_dir)?;
+    std::fs::create_dir_all(frames_dir)?;
+    if info.has_alpha {
+        std::fs::create_dir_all(masks_dir)?;
+    }
+    let images = list_images(source_dir)?;
+    let total = images.len() as u64;
+    for (index, source) in images.iter().enumerate() {
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .ok_or_else(|| SplatError::InvalidPath(source.clone()))?;
+        let name = format!("reshoot_{:06}.{extension}", index + 1);
+        std::fs::copy(source, frames_dir.join(&name))?;
+        if info.has_alpha {
+            write_alpha_mask(
+                &decode_image(source)?,
+                &masks_dir.join(format!("{name}.png")),
+            )?;
+        }
+        on_progress(index as u64 + 1, total);
+    }
+    validate_named_sequence(
+        frames_dir,
+        masks_dir,
+        info.image_count,
+        info.has_alpha,
+        "reshoot_",
+    )
+}
+
+pub fn validate_reshoot_image_sequence(
+    frames_dir: &Path,
+    masks_dir: &Path,
+    expected_count: u64,
+    has_alpha: bool,
+) -> Result<PreparedImageSequence> {
+    validate_named_sequence(frames_dir, masks_dir, expected_count, has_alpha, "reshoot_")
+}
+
 pub fn validate_prepared_image_sequence(
     frames_dir: &Path,
     masks_dir: &Path,
     expected_count: u64,
     has_alpha: bool,
 ) -> Result<PreparedImageSequence> {
-    let frames = list_images(frames_dir)?;
+    validate_named_sequence(frames_dir, masks_dir, expected_count, has_alpha, "frame_")
+}
+
+fn validate_named_sequence(
+    frames_dir: &Path,
+    masks_dir: &Path,
+    expected_count: u64,
+    has_alpha: bool,
+    prefix: &str,
+) -> Result<PreparedImageSequence> {
+    let frames = list_images(frames_dir)?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix))
+        })
+        .collect::<Vec<_>>();
     if frames.len() as u64 != expected_count
         || frames
             .iter()
@@ -314,5 +386,26 @@ mod tests {
                 .get_pixel(0, 0)[0],
             255
         );
+    }
+
+    #[test]
+    fn reshoot_sequences_use_a_collision_free_prefix() {
+        let source = tempfile::tempdir().unwrap();
+        let frames = tempfile::tempdir().unwrap();
+        let masks = tempfile::tempdir().unwrap();
+        write_rgba(&source.path().join("1.png"), 0);
+        write_rgba(&source.path().join("2.png"), 255);
+        let mut progress = Vec::new();
+        let prepared = prepare_reshoot_image_sequence_with_progress(
+            source.path(),
+            frames.path(),
+            masks.path(),
+            |current, total| progress.push((current, total)),
+        )
+        .unwrap();
+        assert_eq!(prepared.mask_count, 2);
+        assert_eq!(progress, [(1, 2), (2, 2)]);
+        assert!(frames.path().join("reshoot_000001.png").is_file());
+        assert!(masks.path().join("reshoot_000001.png.png").is_file());
     }
 }

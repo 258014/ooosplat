@@ -128,6 +128,18 @@ const zhCN = {
   "reshoot.chooseVideoHint": "MP4 或 MOV",
   "reshoot.chooseImages": "选择高清图片序列",
   "reshoot.chooseImagesHint": "JPG、JPEG 或 PNG 文件夹",
+  "reshoot.ineligible": "此项目缺少可复用的相机重建信息，无法进行增量补拍。",
+  "reshoot.sameCameraHint": "补拍会沿用原项目的相机与空间关系，只处理新增画面；高斯会使用全部已注册画面重新训练。",
+  "reshoot.sameDevice": "使用生成原项目时的同一设备、同一镜头和相同拍摄参数。",
+  "reshoot.sameFraming": "保持相同分辨率、方向、宽高比和缩放倍率，不切换超广角、长焦或数码变焦。",
+  "reshoot.keepOverlap": "让补拍画面与原素材保持足够重叠，缓慢移动并避免模糊和大量运动物体。",
+  "reshoot.camera": "相机",
+  "reshoot.analyzing": "正在检查补拍素材",
+  "reshoot.imageCount": "{count} 张图片",
+  "reshoot.duration": "素材时长 {value}",
+  "reshoot.alphaDetected": "检测到 Alpha，将自动保留透明画面并生成 Mask",
+  "reshoot.opaque": "普通不透明素材",
+  "reshoot.estimated": "预计时长 {value}",
   "reshoot.panelTitle": "高清补拍区域",
   "reshoot.panelHint": "用当前{tool}圈住模糊或细节不足的位置，然后加入补拍清单。同一区域只会记录一次。",
   "reshoot.kindSphere": "球选",
@@ -444,6 +456,7 @@ const en: Record<TranslationKey, string> = {
   "history.title": "02 Task History", "history.aria": "Project results", "history.refresh": "Refresh", "history.completed": "Completed", "history.unfinished": "Unfinished", "history.projects": "{count} projects", "history.emptyTitle": "No projects yet", "history.emptyHint": "Choose a video or image sequence and a project folder to start. Results will appear here automatically.",
   "project.date": "Created", "project.elapsed": "Elapsed", "project.quality": "Preset", "project.opening": "Opening", "project.preview": "Preview", "project.resume": "Resume task", "project.reveal": "Show in file manager", "project.delete": "Delete", "project.reshoot": "High-res reshoot",
   "reshoot.importTitle": "Import high-res reshoot footage", "reshoot.importHint": "Reshoot footage is copied into a new derived project, merged with the original input, and COLMAP and Brush run again. The original project and its final.ply are not overwritten.", "reshoot.chooseVideo": "Choose reshoot video", "reshoot.chooseVideoHint": "MP4 or MOV", "reshoot.chooseImages": "Choose high-res image sequence", "reshoot.chooseImagesHint": "JPG, JPEG or PNG folder", "reshoot.panelTitle": "High-res reshoot regions", "reshoot.panelHint": "Use the {tool} to circle blurry or under-detailed spots, then add them to the reshoot list. Each region is recorded once.", "reshoot.kindSphere": "sphere selection", "reshoot.kindBox": "box selection", "reshoot.generatingGuide": "Generating guide", "reshoot.addCurrent": "Add current region", "reshoot.region": "Region {index}", "reshoot.remove": "Remove", "reshoot.removeAria": "Remove reshoot region {index}", "reshoot.viewGuideTitle": "Open the guide image in a new tab", "reshoot.guideImageAlt": "Reshoot direction guide for region {index}", "reshoot.arrowLegend": "Arrows = shooting positions, pointing at the region", "reshoot.generatingDirection": "Generating direction guide", "reshoot.missingGuide": "No guide image generated", "reshoot.errorSelectFirst": "Circle the blurry area with the sphere or box selection first.", "reshoot.errorDuplicate": "That region is already on the reshoot list. Adjust the selection or move the camera before adding it again.", "reshoot.errorNoFrame": "Could not capture the current view.", "reshoot.errorNoGuide": "Could not generate the reshoot guide image.", "reshoot.errorGuideFailed": "Guide image for region {index} failed: {detail}", "reshoot.errorEmpty": "Add at least one region to reshoot.", "reshoot.geometryCenter": "Center ({values})", "reshoot.geometrySphere": "Sphere · {center} · radius {radius}", "reshoot.geometryBox": "Box · {center} · size ({size})", "reshoot.guidanceSphere": "Region {index} | {geometry} | Orbit the region slowly twice: a low angle on the first pass and about 30° higher on the second, at least 12 stops per turn, keeping the region centred with foreground and background parallax.", "reshoot.guidanceBox": "Region {index} | {geometry} | Shoot one high-res pass each from the front, left, right and above, about 30° apart; avoid zooming in place or panning along a single direction.", "reshoot.caption": "Region {index} · {kind} · arrows = shooting positions (pointing at the region)", "reshoot.dirFrontLow": "Front, low", "reshoot.dirFrontRightLow": "Front right, low", "reshoot.dirRightLow": "Right, low", "reshoot.dirBackRightLow": "Back right, low", "reshoot.dirBackLow": "Back, low", "reshoot.dirBackLeftLow": "Back left, low", "reshoot.dirLeftLow": "Left, low", "reshoot.dirFrontLeftLow": "Front left, low", "reshoot.dirFrontRaised": "Front, raised 30°", "reshoot.dirRightRaised": "Right, raised 30°", "reshoot.dirBackRaised": "Back, raised 30°", "reshoot.dirLeftRaised": "Left, raised 30°", "reshoot.dirFront": "Front", "reshoot.dirLeft": "Left", "reshoot.dirRight": "Right", "reshoot.dirFrontRight": "Front right 30°", "reshoot.dirFrontLeft": "Front left 30°",
+  "reshoot.ineligible": "This project does not contain reusable camera reconstruction data.", "reshoot.sameCameraHint": "The reshoot reuses the original camera and reconstruction and processes only new images. Brush then retrains from all registered images.", "reshoot.sameDevice": "Use the same device, lens, and camera settings used for the original project.", "reshoot.sameFraming": "Keep the same resolution, orientation, aspect ratio, and zoom. Do not switch to ultrawide, telephoto, or digital zoom.", "reshoot.keepOverlap": "Keep plenty of overlap with the original footage, move slowly, and avoid blur or many moving objects.", "reshoot.camera": "Camera", "reshoot.analyzing": "Checking reshoot media", "reshoot.imageCount": "{count} images", "reshoot.duration": "Media duration {value}", "reshoot.alphaDetected": "Alpha detected; transparent frames and masks will be preserved automatically", "reshoot.opaque": "Opaque media", "reshoot.estimated": "Estimated duration {value}",
   "result.title": "Generation result", "result.completed": "Completed", "result.splats": "Splat count", "result.fileSize": "PLY size", "result.registered": "Registered images", "result.points": "3D points", "result.elapsed": "Total elapsed", "result.lowRegistration": "Registration rate is {value}%, below 80%; result quality may be affected", "result.export": "Export PLY", "result.reveal": "Show in file manager",
   "status.running": "Processing", "status.completed": "Completed", "status.failed": "Failed", "status.cancelled": "Cancelled", "status.interrupted": "Interrupted",
   "layout.resize": "Resize the new-task and task-history panels", "zoom.aria": "Interface zoom", "zoom.out": "Zoom interface out", "zoom.in": "Zoom interface in", "zoom.resetTitle": "Restore 100%", "zoom.reset": "Reset", "cancel.title": "Stopping task", "cancel.description": "Closing the current stage and its child processes. This window will close automatically when finished.", "preview.preparingModule": "Preparing preview module", "error.generic": "Processing failed. Check the project logs for details.", "error.cancelledNeedle": "cancel",
@@ -579,6 +592,15 @@ export function useI18n() {
 }
 
 const exactPipelineEnglish: Record<string, string> = {
+  "正在复用原项目的相机与重建结果": "Reusing the original camera and reconstruction",
+  "正在提取补拍透明画面与 Mask": "Extracting transparent reshoot frames and masks",
+  "正在准备补拍画面": "Preparing reshoot frames",
+  "正在补充新旧画面之间的联系": "Matching the new images against the original capture",
+  "补拍图像匹配完成": "Reshoot image matching completed",
+  "补拍时不能再次使用原素材，请选择新拍摄的视频或图片序列。": "The original source media cannot be reused for a reshoot. Select a newly captured video or image sequence.",
+  "正在把补拍画面注册到原相机重建中": "Registering reshoot images into the original reconstruction",
+  "正在使用全部已注册画面重新训练高斯": "Retraining Gaussian splats from all registered images",
+  "高清补拍处理完成": "High-resolution reshoot completed",
   "完成记录与 final.ply 不一致，可以继续任务以修复结果": "The completion record does not match final.ply. Resume the task to repair the result.",
   "正在读取视频信息": "Reading video information",
   "正在规划均匀抽帧": "Planning uniform frame extraction",
@@ -630,6 +652,10 @@ export function localizePipelineMessage(locale: Locale, message: string): string
   const exact = exactPipelineEnglish[message];
   if (exact) return exact;
   const patterns: Array<[RegExp, (...values: string[]) => string]> = [
+    [/^正在使用 (CPU|GPU) 提取补拍画面的信息$/, (backend) => `Extracting reshoot image features with ${backend}`],
+    [/^正在准备补拍画面 · ([\d,]+)\/([\d,]+)$/, (current, total) => `Preparing reshoot frames · ${current}/${total}`],
+    [/^补拍画面准备完成 · ([\d,]+) 张$/, (count) => `Reshoot frame preparation completed · ${count} images`],
+    [/^补拍图像匹配中 · 已用时 (.+)$/, (elapsed) => `Matching reshoot images · elapsed ${elapsed}`],
     [/^预计提取 ([\d,]+) 帧$/, (count) => `About ${count} frames will be extracted`],
     [/^已提取 ([\d,]+) 帧$/, (count) => `Extracted ${count} frames`],
     [/^已提取 ([\d,]+) 张透明 PNG 和 ([\d,]+) 张 Mask$/, (frames, masks) => `Extracted ${frames} transparent PNG frames and ${masks} masks`],

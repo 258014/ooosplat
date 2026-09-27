@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { AppRuntimeStatus, ColmapAccelerationStatus, EngineStatus, GaussianCrop, GaussianEditSaveSession, GaussianEditState, GaussianExportProgress, GaussianExportResult, GaussianPreviewDescriptor, GaussianTransform, GaussianVideoExportResult, GaussianVideoExportSession, PipelineEvent, PipelineResult, ProbeAndPlan, ProjectOverview, ProjectSummary, Quality, RuntimeEstimate } from "../types/pipeline";
+import type { AppRuntimeStatus, ColmapAccelerationStatus, EngineStatus, GaussianCrop, GaussianEditSaveSession, GaussianEditState, GaussianExportProgress, GaussianExportResult, GaussianPreviewDescriptor, GaussianTransform, GaussianVideoExportResult, GaussianVideoExportSession, InputType, PipelineEvent, PipelineResult, ProbeAndPlan, ProjectOverview, ProjectSummary, Quality, ReshootInputInfo, ReshootSourceInfo, RuntimeEstimate } from "../types/pipeline";
 import type { TelemetryPreferences } from "../types/telemetry";
 import { getCurrentLocale, translate } from "../i18n";
 import { previewAssetUrl } from "./previewAssetUrl";
@@ -53,9 +53,10 @@ export async function getAppRuntimeStatus(): Promise<AppRuntimeStatus> { return 
 export async function setProjectsRoot(projectsRoot: string): Promise<{ projectsRoot: string }> { return invoke("set_projects_root", { projectsRoot }); }
 export async function startPipeline(path: string, quality: Quality, projectsRoot: string): Promise<PipelineResult> { return invoke("start_pipeline", { path, quality, projectsRoot }); }
 export async function resumePipeline(projectId: string): Promise<PipelineResult> { return invoke("resume_pipeline", { projectId }); }
-export async function startReshootPipeline(request: { sourceProjectId: string; reshootPath: string; quality: Quality; projectsRoot: string; regions: NonNullable<GaussianCrop>[]; guidance: string[]; guideImages: Array<string | null> }): Promise<PipelineResult> {
-  // Regions without a generated guide image stay aligned by sending an empty slot.
-  return invoke("start_reshoot_pipeline", { request: { ...request, guideImages: request.guideImages.map((image) => image ?? "") } });
+export async function inspectReshootSource(projectId: string): Promise<ReshootSourceInfo> { return invoke("inspect_reshoot_source", { projectId }); }
+export async function probeReshootInput(projectId: string, path: string, inputType: InputType): Promise<ReshootInputInfo> { return invoke("probe_reshoot_input", { projectId, path, inputType }); }
+export async function startReshootPipeline(request: { sourceProjectId: string; reshootPath: string; inputType: InputType; projectsRoot: string }): Promise<PipelineResult> {
+  return invoke("start_incremental_reshoot_pipeline", { request });
 }
 export async function cancelPipeline(): Promise<void> { return invoke("cancel_pipeline"); }
 export async function onPipelineEvent(handler: (event: PipelineEvent) => void): Promise<UnlistenFn> { return listen<PipelineEvent>("pipeline-event", ({ payload }) => handler(payload)); }

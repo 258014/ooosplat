@@ -217,19 +217,24 @@ pub struct ReshootProvenance {
     pub source_final_ply: PathBuf,
     /// The reshoot media the user supplied.
     pub reshoot_source_path: PathBuf,
-    /// Regions of the source model the user marked for a fresh capture.
-    pub regions: Vec<GaussianCrop>,
-    /// Per-region shooting directions shown to the user while capturing.
-    pub guidance: Vec<String>,
-    /// Annotated guide images written into the derived project: the circled
-    /// region plus arrows marking where each shot should be taken from.
     #[serde(default)]
-    pub guidance_images: Vec<PathBuf>,
-    /// Images the source contributed, and images the reshoot media contributed.
+    pub camera_id: u32,
     #[serde(default)]
-    pub original_frame_count: u64,
+    pub camera_model: String,
+    #[serde(default)]
+    pub width: u64,
+    #[serde(default)]
+    pub height: u64,
+    #[serde(default)]
+    pub has_alpha: bool,
+    #[serde(default)]
+    pub mask_count: u64,
+    #[serde(default)]
+    pub source_image_count: u64,
     #[serde(default)]
     pub reshoot_frame_count: u64,
+    #[serde(default)]
+    pub registered_reshoot_count: u64,
 }
 
 pub const fn schema_version() -> u32 {
@@ -284,6 +289,28 @@ pub struct PipelineStateFile {
     pub matching_complete: bool,
     pub reconstruction_complete: bool,
     pub brush_complete: bool,
+    #[serde(default)]
+    pub reshoot: Option<ReshootState>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReshootState {
+    pub source_snapshot_complete: bool,
+    pub supplemental_frames_complete: bool,
+    pub supplemental_features_complete: bool,
+    pub incremental_matching_complete: bool,
+    pub incremental_reconstruction_complete: bool,
+    #[serde(default)]
+    pub source_image_count: u64,
+    #[serde(default)]
+    pub reshoot_frame_count: u64,
+    #[serde(default)]
+    pub mask_count: u64,
+    #[serde(default)]
+    pub has_alpha: bool,
+    #[serde(default)]
+    pub registered_reshoot_count: u64,
 }
 
 impl PipelineStateFile {
@@ -303,6 +330,7 @@ impl PipelineStateFile {
             matching_complete: false,
             reconstruction_complete: false,
             brush_complete: false,
+            reshoot: None,
         }
     }
 }

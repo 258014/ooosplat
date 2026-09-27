@@ -12,14 +12,14 @@ import {
   estimateProjectRuntime, exportPly, getAppRuntimeStatus, getProjectOverview, onPipelineEvent, probeAndPlan, revealProject, revealProjectLogs,
   selectImageSequence, selectProjectsRoot, selectVideo,
   setProjectsRoot, startPipeline, prepareGaussianPreview, releaseGaussianPreview,
-  initializeTelemetry, setTelemetryConsent, resumePipeline, startReshootPipeline,
+  initializeTelemetry, inspectReshootSource, probeReshootInput, setTelemetryConsent, resumePipeline, startReshootPipeline,
 } from "../lib/backend";
 import { startElapsedTicker } from "../lib/elapsedTimer";
 import { pipelineCommandError, pipelineErrorMessage, pipelineWasCancelled, type PipelineFailureKind } from "../lib/pipelineError";
 import { localizePipelineMessage, useI18n, type TranslationKey } from "../i18n";
 import { useAppStore } from "../stores/appStore";
 import { useGaussianTransformStore } from "../stores/gaussianTransformStore";
-import type { EngineStatus, GaussianCrop, InputType, ProjectStatus, ProjectSummary, Quality } from "../types/pipeline";
+import type { EngineStatus, InputType, ProjectStatus, ProjectSummary, Quality, ReshootInputInfo, ReshootSourceInfo } from "../types/pipeline";
 import type { TelemetryPreferences as TelemetryPreferencesState } from "../types/telemetry";
 
 const GaussianViewer = lazy(() => import("../components/GaussianViewer").then((module) => ({ default: module.GaussianViewer })));
@@ -242,9 +242,13 @@ export function App() {
   const [privacySettingsOpen, setPrivacySettingsOpen] = useState(false);
   const [telemetryBusy, setTelemetryBusy] = useState(false);
   const [inputMenuOpen, setInputMenuOpen] = useState(false);
-  const [reshootInputMenuOpen, setReshootInputMenuOpen] = useState(false);
-  const [pendingReshoot, setPendingReshoot] = useState<{ sourceProjectId: string; regions: NonNullable<GaussianCrop>[]; guidance: string[]; guideImages: Array<string | null> } | null>(null);
-  const [reshootEntry, setReshootEntry] = useState(false);
+  const [reshootProject, setReshootProject] = useState<ProjectSummary | null>(null);
+  const [reshootSource, setReshootSource] = useState<ReshootSourceInfo | null>(null);
+  const [reshootInputType, setReshootInputType] = useState<InputType>("video");
+  const [reshootPath, setReshootPath] = useState<string | null>(null);
+  const [reshootPlan, setReshootPlan] = useState<ReshootInputInfo | null>(null);
+  const [reshootError, setReshootError] = useState<string | null>(null);
+  const [reshootBusy, setReshootBusy] = useState(false);
   const missingEngines = store.engines.filter((engine) => !engineReady(engine));
   const completed = useMemo(() => store.projects.filter((project) => project.status === "completed"), [store.projects]);
   const unfinished = useMemo(() => store.projects.filter((project) => project.status !== "completed"), [store.projects]);
@@ -631,11 +635,10 @@ export function App() {
     }
   }, [clearPreviewSession, messageOf, releasePreviewSession, store.setError, t]);
 
-  const previewProject = async (project: ProjectSummary, options?: { reshoot?: boolean }) => {
+  const previewProject = async (project: ProjectSummary) => {
     if (project.status !== "completed" || openingPreviewProjectId || closingPreviewProjectId === project.id) return;
     const previous = useGaussianTransformStore.getState().descriptor?.projectId;
     setOpeningPreviewProjectId(project.id);
-    setReshootEntry(Boolean(options?.reshoot));
     store.setError(null);
     try {
       await reconcileRuntimeState();
@@ -659,48 +662,89 @@ export function App() {
     }
   };
 
-  const startReshoot = async (
-    sourceProjectId: string,
-    regions: NonNullable<GaussianCrop>[],
-    guidance: string[],
-    guideImages: Array<string | null>,
-  ) => {
-    if (isRunning || !store.projectsRoot) return;
-    setPendingReshoot({ sourceProjectId, regions, guidance, guideImages });
-    setReshootInputMenuOpen(true);
+  const openReshoot = async (project: ProjectSummary) => {
+    if (isRunning || reshootBusy) return;
+    setReshootProject(project);
+    setReshootSource(null);
+    setReshootPath(null);
+    setReshootPlan(null);
+    setReshootError(null);
+    setReshootInputType("video");
+    setReshootBusy(true);
+    try {
+      const source = await inspectReshootSource(project.id);
+      setReshootSource(source);
+      if (!source.eligible) {
+        const message = source.reason ?? t("reshoot.ineligible");
+        setReshootError(message);
+        store.setError(message);
+      }
+    } catch (error) {
+      store.setError(messageOf(error));
+      setReshootProject(null);
+    } finally {
+      setReshootBusy(false);
+    }
   };
 
   const chooseReshootInput = async (inputType: InputType) => {
-    const request = pendingReshoot;
-    setReshootInputMenuOpen(false);
-    setPendingReshoot(null);
-    if (!request || isRunning || !store.projectsRoot) return;
-    const reshootPath = inputType === "images" ? await selectImageSequence() : await selectVideo();
-    if (!reshootPath) return;
-    await exitPreview();
+    if (!reshootProject || reshootBusy) return;
+    setReshootInputType(inputType);
+    const selected = inputType === "images" ? await selectImageSequence() : await selectVideo();
+    if (!selected) return;
+    setReshootBusy(true);
+    setReshootPath(selected);
+    setReshootPlan(null);
+    setReshootError(null);
+    try {
+      const plan = await probeReshootInput(reshootProject.id, selected, inputType);
+      setReshootPlan(plan);
+      if (!plan.compatible) {
+        setReshootError(plan.incompatibilityReason ?? t("reshoot.ineligible"));
+        store.setError(plan.incompatibilityReason);
+      }
+    } catch (error) {
+      const message = messageOf(error);
+      setReshootError(message);
+      store.setError(message);
+    } finally {
+      setReshootBusy(false);
+    }
+  };
+
+  const runReshoot = async () => {
+    if (!reshootProject || !reshootPath || !reshootPlan?.compatible || isRunning || !store.projectsRoot) return;
+    const sourceProjectId = reshootProject.id;
+    setReshootProject(null);
     clearCancellationFeedback();
     runElapsedOffset.current = 0;
     runStartedAt.current = Date.now();
     setLiveElapsedMs(0);
+    setFailureDialog(null);
+    pipelineCommandPending.current = true;
     store.beginRun();
     try {
       const result = await startReshootPipeline({
-        sourceProjectId: request.sourceProjectId,
+        sourceProjectId,
         reshootPath,
-        quality: store.quality,
+        inputType: reshootInputType,
         projectsRoot: store.projectsRoot,
-        regions: request.regions,
-        guidance: request.guidance,
-        guideImages: request.guideImages,
       });
       store.setResult(result);
       store.setPhase("completed");
     } catch (error) {
       const message = messageOf(error);
       store.setError(message);
-      store.setPhase(message.includes("取消") ? "cancelled" : "failed");
+      const latestStage = useAppStore.getState().latestEvent?.stage;
+      const cancelled = pipelineWasCancelled(error, latestStage);
+      store.setPhase(cancelled ? "cancelled" : "failed");
+      if (!cancelled) {
+        const fallbackStage = [...useAppStore.getState().events].reverse().find((event) => !["failed", "cancelled"].includes(event.stage))?.stage;
+        setFailureDialog(inferFailureDialog(error, fallbackStage));
+      }
     } finally {
       try { await refreshProjects(); } catch { /* derived project remains on disk */ }
+      pipelineCommandPending.current = false;
     }
   };
 
@@ -763,7 +807,6 @@ export function App() {
     const active = activePreviewSession.current;
     if (!active || closingPreviewProjectId) return;
     setClosingPreviewProjectId(active.projectId);
-    setReshootEntry(false);
     setViewMode("tasks");
     if (previewCloseWatchdog.current != null) window.clearTimeout(previewCloseWatchdog.current);
     previewCloseWatchdog.current = window.setTimeout(() => {
@@ -786,19 +829,8 @@ export function App() {
   if (viewMode === "preview") {
     return <main className="app-shell preview-mode">
       <Suspense fallback={<section className="preview-pane active preview-workspace"><div className="preview-empty"><LoaderCircle className="spin" size={24} /><strong>{t("preview.preparingModule")}</strong></div></section>}>
-        <GaussianViewer previewSessionId={previewSessionId} onExit={exitPreview} onDisposed={previewRendererDisposed} pipelineRunning={isRunning} onStartReshoot={startReshoot} reshootEntry={reshootEntry} />
+        <GaussianViewer previewSessionId={previewSessionId} onExit={exitPreview} onDisposed={previewRendererDisposed} pipelineRunning={isRunning} />
       </Suspense>
-      {reshootInputMenuOpen && <div className="reshoot-input-backdrop" role="dialog" aria-modal="true" aria-labelledby="reshoot-input-title">
-        <section className="reshoot-input-dialog">
-          <h2 id="reshoot-input-title">{t("reshoot.importTitle")}</h2>
-          <p>{t("reshoot.importHint")}</p>
-          <div className="reshoot-input-options">
-            <button type="button" onClick={() => void chooseReshootInput("video")}><Clapperboard size={18} /><strong>{t("reshoot.chooseVideo")}</strong><small>{t("reshoot.chooseVideoHint")}</small></button>
-            <button type="button" onClick={() => void chooseReshootInput("images")}><Images size={18} /><strong>{t("reshoot.chooseImages")}</strong><small>{t("reshoot.chooseImagesHint")}</small></button>
-          </div>
-          <button type="button" className="reshoot-input-cancel" onClick={() => { setReshootInputMenuOpen(false); setPendingReshoot(null); }}>{t("common.cancel")}</button>
-        </section>
-      </div>}
     </main>;
   }
 
@@ -961,7 +993,7 @@ export function App() {
 
         {completed.length === 0 && unfinished.length === 0 && <div className="empty-state"><FileBox size={30} strokeWidth={1.4} /><strong>{t("history.emptyTitle")}</strong><p>{t("history.emptyHint")}</p></div>}
 
-        {completed.length > 0 && <div className="project-group"><div className="group-heading"><span>{t("history.completed")}</span><small>{t("history.projects", { count: completed.length })}</small></div>{completed.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={openingPreviewProjectId === project.id} previewDisabled={openingPreviewProjectId !== null || closingPreviewProjectId === project.id} deleting={deletingProjectId === project.id} revealing={revealingProjectId === project.id} onPreview={(item) => void previewProject(item)} onReshoot={(item) => void previewProject(item, { reshoot: true })} onResume={() => undefined} onReveal={(item) => void showProject(item)} onDelete={(item) => void removeProject(item)} />)}</div>}
+        {completed.length > 0 && <div className="project-group"><div className="group-heading"><span>{t("history.completed")}</span><small>{t("history.projects", { count: completed.length })}</small></div>{completed.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={openingPreviewProjectId === project.id} previewDisabled={openingPreviewProjectId !== null || closingPreviewProjectId === project.id} deleting={deletingProjectId === project.id} revealing={revealingProjectId === project.id} onPreview={(item) => void previewProject(item)} onReshoot={(item) => void openReshoot(item)} onResume={() => undefined} onReveal={(item) => void showProject(item)} onDelete={(item) => void removeProject(item)} />)}</div>}
         {unfinished.length > 0 && <div className="project-group unfinished"><div className="group-heading"><span>{t("history.unfinished")}</span><small>{t("history.projects", { count: unfinished.length })}</small></div>{unfinished.map((project) => <ProjectRow key={project.id} project={project} busy={isRunning} previewing={false} previewDisabled deleting={deletingProjectId === project.id} revealing={revealingProjectId === project.id} onPreview={() => undefined} onReshoot={() => undefined} onResume={(item) => void resume(item)} onReveal={(item) => void showProject(item)} onDelete={(item) => void removeProject(item)} />)}</div>}
       </section>
     </section>
@@ -975,6 +1007,28 @@ export function App() {
       </div>}
       <button className="zoom-trigger" type="button" aria-expanded={showZoomControls} onClick={() => setShowZoomControls((visible) => !visible)}>{uiScale}%</button>
     </aside>
+    {reshootProject && <div className="reshoot-input-backdrop" role="dialog" aria-modal="true" aria-labelledby="reshoot-input-title">
+      <section className="reshoot-input-dialog reshoot-workflow-dialog">
+        <div className="reshoot-dialog-heading"><div><small>{reshootProject.name}</small><h2 id="reshoot-input-title">{t("reshoot.importTitle")}</h2></div><button type="button" aria-label={t("common.close")} disabled={reshootBusy || isRunning} onClick={() => setReshootProject(null)}><X size={16} /></button></div>
+        <p>{t("reshoot.sameCameraHint")}</p>
+        <ul className="reshoot-capture-tips"><li>{t("reshoot.sameDevice")}</li><li>{t("reshoot.sameFraming")}</li><li>{t("reshoot.keepOverlap")}</li></ul>
+        {reshootSource && <dl className="reshoot-source-summary"><div><dt>{t("project.quality")}</dt><dd>{t(qualityKey[reshootSource.quality])}</dd></div><div><dt>{t("metrics.resolution")}</dt><dd>{reshootSource.width} × {reshootSource.height}</dd></div><div><dt>{t("reshoot.camera")}</dt><dd>{reshootSource.cameraModel} · ID {reshootSource.cameraId}</dd></div></dl>}
+        <div className="reshoot-input-options">
+          <button type="button" disabled={reshootBusy || !reshootSource?.eligible} onClick={() => void chooseReshootInput("video")}><Clapperboard size={18} /><strong>{t("reshoot.chooseVideo")}</strong><small>{t("reshoot.chooseVideoHint")}</small></button>
+          <button type="button" disabled={reshootBusy || !reshootSource?.eligible} onClick={() => void chooseReshootInput("images")}><Images size={18} /><strong>{t("reshoot.chooseImages")}</strong><small>{t("reshoot.chooseImagesHint")}</small></button>
+        </div>
+        {reshootBusy && <p className="reshoot-analysis"><LoaderCircle className="spin" size={14} />{t("reshoot.analyzing")}</p>}
+        {reshootError && <div className="inline-error reshoot-inline-error" role="alert"><CircleAlert size={16} /><span>{localizePipelineMessage(locale, reshootError)}</span></div>}
+        {reshootPlan && <div className={reshootPlan.compatible ? "reshoot-plan compatible" : "reshoot-plan incompatible"}>
+          <strong>{reshootPath ? basename(reshootPath) : ""}</strong>
+          <span>{reshootPlan.imageCount != null ? t("reshoot.imageCount", { count: reshootPlan.imageCount }) : t("reshoot.duration", { value: formatVideoDuration(reshootPlan.duration ?? 0) })}</span>
+          <span>{reshootPlan.preparedWidth} × {reshootPlan.preparedHeight} · {reshootPlan.hasAlpha ? t("reshoot.alphaDetected") : t("reshoot.opaque")}</span>
+          <span>{t("reshoot.estimated", { value: formatDuration(reshootPlan.estimate.estimatedMs) })}</span>
+          {!reshootPlan.compatible && <b>{reshootPlan.incompatibilityReason}</b>}
+        </div>}
+        <div className="reshoot-dialog-actions"><button type="button" className="secondary" disabled={reshootBusy || isRunning} onClick={() => setReshootProject(null)}>{t("common.cancel")}</button><button type="button" className="primary" disabled={reshootBusy || isRunning || !reshootPlan?.compatible} onClick={() => void runReshoot()}><Play size={14} fill="currentColor" />{t("generate.start")}</button></div>
+      </section>
+    </div>}
     {showCancellationOverlay && isRunning && <div className="cancellation-backdrop" role="dialog" aria-modal="true" aria-labelledby="cancellation-title" aria-describedby="cancellation-description">
       <div className="cancellation-status" aria-live="assertive" aria-busy="true">
         <span className="cancellation-spinner" aria-hidden="true"><LoaderCircle className="spin" size={26} /></span>
