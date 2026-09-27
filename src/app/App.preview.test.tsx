@@ -732,7 +732,7 @@ describe("App preview workspace", () => {
 
     expect(mocks.selectImageSequence).toHaveBeenCalledOnce();
     expect(container.textContent).toContain("24 张");
-    expect(container.textContent).toContain("将保留 PNG Alpha");
+    expect(container.textContent).toContain("生成时将精确检测透明度");
     expect(container.querySelectorAll(".input-picker")).toHaveLength(1);
   });
 
